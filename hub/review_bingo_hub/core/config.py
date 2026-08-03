@@ -193,6 +193,34 @@ class Settings(BaseSettings):
         description="Google Cloud project ID",
     )
 
+    # review-bingo grid configuration
+    github_webhook_secret: str | None = Field(
+        default=None,
+        alias="GITHUB_WEBHOOK_SECRET",
+        description="HMAC secret for GitHub webhook signatures; unset skips verification (local dev only)",
+    )
+    github_app_id: str | None = Field(
+        default=None,
+        alias="GITHUB_APP_ID",
+        description="GitHub App ID for relaying results back to PRs; unset means log-only relay",
+    )
+    github_app_private_key: str | None = Field(
+        default=None,
+        alias="GITHUB_APP_PRIVATE_KEY",
+        description="PEM private key for the GitHub App (relay); unset means log-only relay",
+    )
+    github_api_url: str = Field(
+        default="https://api.github.com",
+        alias="GITHUB_API_URL",
+        description="GitHub API base URL (override for GHE)",
+    )
+    lease_ttl_seconds: int = Field(
+        default=600,
+        ge=30,
+        alias="LEASE_TTL_SECONDS",
+        description="How long a client holds a review job lease before it is reclaimed",
+    )
+
     @field_validator("jwt_algorithm")
     @classmethod
     def validate_jwt_algorithm(cls, value: str) -> str:

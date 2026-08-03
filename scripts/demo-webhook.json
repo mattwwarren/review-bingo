@@ -1,0 +1,9 @@
+{
+  "action": "opened",
+  "repository": { "full_name": "acme/payments" },
+  "pull_request": {
+    "number": 7,
+    "title": "Fix rounding in refund path",
+    "head": { "sha": "abcdef1234567890abcdef1234567890abcdef12" }
+  }
+}

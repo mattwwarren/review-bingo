@@ -14,7 +14,7 @@ from sqlmodel import Field, SQLModel
 from review_bingo_hub.models.base import TimestampedTable
 
 
-class MembershipRole(str, enum.Enum):
+class MembershipRole(enum.StrEnum):
     """Role levels for organization members.
 
     Roles enforce a hierarchy: OWNER > ADMIN > MEMBER

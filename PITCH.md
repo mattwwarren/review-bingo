@@ -95,8 +95,14 @@ earns its keep.
 
 1. ~~Pick the name~~ — **review-bingo**.
 2. ~~Create the repo~~ — done if you're reading this in `companies/review-bingo/`.
-3. Copier-render `fastapi-template` into `hub/` (answers file scoped to the
-   subdir); `react-template` into `dashboard/` later, once the hub API exists.
-4. Register the GitHub App (webhook → hub) against a test repo.
-5. Define the client registration/lease API before any review logic — the
-   check-in/check-out loop is the product's spine.
+3. ~~Copier-render `fastapi-template` into `hub/`~~ — done (copier branch,
+   port 7575, auth off); `react-template` into `dashboard/` once the hub API
+   settles.
+4. ~~Define the client registration/lease API~~ — done: check-in/check-out,
+   `FOR UPDATE SKIP LOCKED` leasing with lazy lease reclamation, tier-floor
+   matching at dispatch, report → best-effort relay. `scripts/demo.sh` runs
+   the whole loop offline.
+5. Register the GitHub App (webhook → hub) against a test repo and run a
+   real PR through the grid.
+6. Aggregation: decide what happens when multiple clients report rounds on
+   the same PR (today: one job per PR head, first lease wins).

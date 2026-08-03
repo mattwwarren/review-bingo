@@ -18,9 +18,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from pydantic import ValidationError
 from review_bingo_hub.core.config import Settings
 from review_bingo_hub.core.storage import StorageProvider
-from pydantic import ValidationError
 
 
 @pytest.fixture

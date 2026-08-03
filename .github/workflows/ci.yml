@@ -1,0 +1,73 @@
+# Root CI for the review-bingo monorepo.
+#
+# The Copier-rendered workflows under hub/.github/ are inert (GitHub only
+# reads /.github at the repo root); this workflow runs the same gates with
+# working-directory pinned to hub/. Tests use pytest-docker, which starts
+# Postgres from hub/tests/docker-compose.yml.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+defaults:
+  run:
+    working-directory: hub
+
+jobs:
+  lint:
+    name: Lint & type-check (hub)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check review_bingo_hub
+
+      - name: ruff format
+        run: uv run ruff format --check review_bingo_hub
+
+      - name: mypy
+        run: uv run mypy review_bingo_hub
+
+  tests:
+    name: Tests (hub)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('hub/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest review_bingo_hub/tests/ -v

@@ -1,8 +1,33 @@
-# hub
+# FastAPI Template (Copier Branch)
 
-The grid operator: GitHub App webhooks in, review jobs out, results relayed
-back to PRs. Owns the client registry (check-in/check-out, declared
-capabilities) and enforces per-repo minimum-model floors at dispatch.
+This branch contains the Copier template version of fastapi-template.
 
-**Not rendered yet.** Bootstrap with Copier from `templates/fastapi-template`
-into this directory (scoped answers file), then delete this note.
+## Usage
+
+Create a new project from this template:
+
+```bash
+copier copy gh:mattwwarren/fastapi-template --vcs-ref copier my-new-project
+```
+
+Or with specific options:
+
+```bash
+copier copy gh:mattwwarren/fastapi-template --vcs-ref copier my-new-project \
+  --data project_name="My API Service" \
+  --data auth_enabled=true \
+  --data auth_provider=ory
+```
+
+## Template Variables
+
+See `copier.yaml` for all available configuration options.
+
+## Source
+
+This branch is auto-generated from the main branch.
+Do not edit this branch directly - make changes in main and they will be
+published here automatically on release.
+
+See the [main branch](https://github.com/mattwwarren/fastapi-template) for
+development instructions and contribution guidelines.

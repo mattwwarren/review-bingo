@@ -15,7 +15,7 @@ from fastapi.responses import PlainTextResponse
 
 from review_bingo_hub.api.clients import ClientDep
 from review_bingo_hub.db.session import SessionDep
-from review_bingo_hub.models.review_client import ClientStatus
+from review_bingo_hub.models.review_client import ClientStatus, tiers_at_or_below
 from review_bingo_hub.models.review_job import (
     JobState,
     ReviewJobLease,
@@ -23,7 +23,13 @@ from review_bingo_hub.models.review_job import (
     ReviewJobReport,
 )
 from review_bingo_hub.services.client_service import touch_client
-from review_bingo_hub.services.job_service import get_job, lease_next_job, list_jobs, report_job
+from review_bingo_hub.services.job_service import (
+    get_job,
+    lease_next_job,
+    lease_specific_job,
+    list_jobs,
+    report_job,
+)
 from review_bingo_hub.services.relay_service import relay_result, relay_target, render_comment
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -48,6 +54,43 @@ async def lease_job_endpoint(session: SessionDep, client: ClientDep) -> ReviewJo
     if job.lease_expires_at is None:  # pragma: no cover - lease always sets expiry
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Lease missing expiry")
     return ReviewJobLease(job=ReviewJobRead.model_validate(job), lease_expires_at=job.lease_expires_at)
+
+
+@router.post("/{job_id}/lease", response_model=ReviewJobLease)
+async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client: ClientDep) -> ReviewJobLease:
+    """Lease one named job — the "I picked this one" path.
+
+    Unlike `/jobs/lease`, an unavailable job is an error rather than an empty
+    body: the caller asked for something specific, so silence would be a worse
+    answer than a reason.
+    """
+    if client.status != ClientStatus.CHECKED_IN:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Check in before leasing")
+
+    job = await get_job(session, job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    # min_tier/tier are ModelTier at the type level but plain strings at runtime —
+    # the columns are sa.String(), so SQLModel hands back what Postgres stored.
+    # Membership still works (ModelTier is a StrEnum), but .value does not exist.
+    if job.min_tier not in tiers_at_or_below(client.tier):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Job requires tier {str(job.min_tier)!r} or better; this client declares {str(client.tier)!r}",
+        )
+
+    await touch_client(session, client)
+    leased = await lease_specific_job(session, client, job_id)
+    await session.commit()
+
+    if leased is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Job is not available to lease (already leased, or no longer queued)",
+        )
+    if leased.lease_expires_at is None:  # pragma: no cover - lease always sets expiry
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Lease missing expiry")
+    return ReviewJobLease(job=ReviewJobRead.model_validate(leased), lease_expires_at=leased.lease_expires_at)
 
 
 @router.post("/{job_id}/report", response_model=ReviewJobRead)

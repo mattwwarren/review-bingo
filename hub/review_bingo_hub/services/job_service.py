@@ -114,6 +114,38 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
     if job is None:
         return None
 
+    return await _hand_over(session, job, client)
+
+
+async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id: UUID) -> ReviewJob | None:
+    """Lease one named job, or None when it is not this client's to take.
+
+    Backs "pick this one" flows (dashboard selection, MCP clients) where the
+    caller already knows which job it wants. The eligibility rules are the
+    same as `lease_next_job` — naming a job is not a way around a repo's model
+    floor — and the state check lives inside the locking SELECT so two callers
+    racing for the same job resolve to exactly one winner.
+    """
+    await reclaim_expired_leases(session)
+
+    eligible_tiers = [t.value for t in tiers_at_or_below(client.tier)]
+    result = await session.execute(
+        select(ReviewJob)
+        .where(col(ReviewJob.id) == job_id)
+        .where(col(ReviewJob.state) == JobState.QUEUED.value)
+        .where(col(ReviewJob.min_tier).in_(eligible_tiers))
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        return None
+
+    return await _hand_over(session, job, client)
+
+
+async def _hand_over(session: AsyncSession, job: ReviewJob, client: ReviewClient) -> ReviewJob:
+    """Mark a job leased by a client and start its lease clock."""
     job.state = JobState.LEASED
     job.leased_by = client.id
     job.lease_expires_at = datetime.now(UTC) + timedelta(seconds=settings.lease_ttl_seconds)

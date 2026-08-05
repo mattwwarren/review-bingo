@@ -35,6 +35,10 @@ class JobState(StrEnum):
     REPORTED = "reported"
     RELAYED = "relayed"
     EXHAUSTED = "exhausted"
+    # Distinct from EXHAUSTED: the work became moot (its PR closed), it did not
+    # run out of attempts. Collapsing the two would hide dispatch failures among
+    # ordinary merges.
+    CANCELLED = "cancelled"
 
 
 class ReviewJobBase(SQLModel):

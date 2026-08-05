@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>review-bingo — the card</title>
+<style>
+  :root {
+    --ink:      #0E1230;
+    --ink-2:    #171C46;
+    --chalk:    #EEF0FF;
+    --dauber:   #FF3D8B;
+    --signal:   #FFC24B;
+    --dim:      #6E76B0;
+
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--chalk);
+    font-family: var(--sans);
+    /* The hall is lit from above; cards sit in the pool of light. */
+    background-image: radial-gradient(120% 80% at 50% -10%, #1C2258 0%, var(--ink) 60%);
+    min-height: 100vh;
+  }
+
+  /* ---- status strip ---------------------------------------------------- */
+
+  .strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 28px;
+    padding: 18px 28px;
+    border-bottom: 1px solid #262C63;
+  }
+
+  .wordmark {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    margin-right: auto;
+  }
+  .wordmark b { color: var(--dauber); font-weight: 800; }
+
+  .tally {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    letter-spacing: 0.02em;
+  }
+  .tally strong { color: var(--chalk); font-weight: 600; }
+
+  .pulse { display: inline-flex; align-items: center; gap: 7px; }
+  .pulse::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--signal);
+    box-shadow: 0 0 0 0 rgba(255, 194, 75, 0.55);
+    animation: ping 2.4s ease-out infinite;
+  }
+  .pulse[data-live="false"]::before {
+    background: var(--dauber);
+    animation: none;
+  }
+  @keyframes ping {
+    70%  { box-shadow: 0 0 0 7px rgba(255, 194, 75, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 194, 75, 0); }
+  }
+
+  /* ---- layout ---------------------------------------------------------- */
+
+  .hall {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 32px;
+    padding: 28px;
+    align-items: start;
+  }
+  @media (max-width: 860px) {
+    .hall { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 0 0 14px;
+  }
+
+  /* ---- the card -------------------------------------------------------- */
+
+  .card {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .cell {
+    position: relative;
+    overflow: hidden;
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 14px;
+    min-height: 116px;
+    background: var(--ink-2);
+    border: 1px solid #2C3372;
+    border-radius: 3px;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    animation: deal 260ms ease-out both;
+  }
+  @keyframes deal {
+    from { opacity: 0; transform: translateY(6px); }
+  }
+
+  .cell:hover { border-color: var(--dim); }
+  .cell:focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 2px;
+  }
+  /* Selection is chalk, never amber — amber means "the round landed", and a
+     colour that means two things means neither. */
+  .cell[aria-pressed="true"] {
+    border-color: var(--chalk);
+    box-shadow: inset 0 0 0 1px var(--chalk);
+  }
+
+  /* The daub: ink pressed onto the card once a job is spoken for. Its colour
+     is the outcome — magenta while a client holds it, amber once the round
+     came back and landed on the PR. One device, two readings. */
+  .cell[data-daubed="true"]::before {
+    content: "";
+    position: absolute;
+    inset: -22%;
+    background: radial-gradient(closest-side, var(--daub-ink) 0%, var(--daub-ink) 40%, transparent 72%);
+    opacity: 0.5;
+    transform: rotate(-8deg);
+    animation: daub 320ms cubic-bezier(0.2, 1.4, 0.4, 1) both;
+    pointer-events: none;
+  }
+  .cell { --daub-ink: rgba(255, 61, 139, 0.75); }
+  .cell[data-state="relayed"] { --daub-ink: rgba(255, 194, 75, 0.6); }
+  @keyframes daub {
+    from { transform: rotate(-8deg) scale(0.55); opacity: 0; }
+  }
+
+  .cell[data-state="cancelled"],
+  .cell[data-state="exhausted"] { opacity: 0.5; }
+  .cell[data-state="cancelled"] .cell-repo { text-decoration: line-through; }
+
+  .cell-repo {
+    position: relative;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -0.01em;
+    word-break: break-word;
+  }
+  .cell-title {
+    position: relative;
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: #B9BEEA;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .cell-foot {
+    position: relative;
+    margin-top: 10px;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .cell-state { color: var(--chalk); letter-spacing: 0.08em; text-transform: uppercase; }
+  .cell[data-state="relayed"] .cell-state { color: var(--signal); }
+
+  .empty {
+    grid-column: 1 / -1;
+    border: 1px dashed #2C3372;
+    border-radius: 3px;
+    padding: 34px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 14px;
+  }
+
+  /* ---- rail ------------------------------------------------------------ */
+
+  .rail { display: grid; gap: 26px; }
+
+  .roster { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .plug {
+    display: grid;
+    gap: 2px;
+    padding-left: 15px;
+    position: relative;
+    font-size: 13px;
+  }
+  .plug::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 6px;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--signal);
+  }
+  .plug[data-status="checked_out"]::before { background: #3B4288; }
+  .plug-spec { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+
+  .picked {
+    border-top: 1px solid #262C63;
+    padding-top: 18px;
+    display: grid;
+    gap: 10px;
+  }
+  .picked-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    word-break: break-all;
+    color: var(--chalk);
+  }
+  .handoff {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: #0A0D26;
+    border: 1px solid #2C3372;
+    border-radius: 3px;
+    padding: 10px;
+    color: var(--signal);
+    word-break: break-all;
+  }
+  .copy {
+    justify-self: start;
+    font: inherit;
+    font-size: 12px;
+    padding: 7px 12px;
+    border-radius: 3px;
+    border: 1px solid var(--dim);
+    background: transparent;
+    color: var(--chalk);
+    cursor: pointer;
+  }
+  .copy:hover { border-color: var(--signal); color: var(--signal); }
+  .copy:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+  .muted { color: var(--dim); font-size: 13px; line-height: 1.5; margin: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="strip">
+  <div class="wordmark">review<b>·</b>bingo</div>
+  <div class="tally pulse" id="health" data-live="true">hub live</div>
+  <div class="tally" id="tally"></div>
+</header>
+
+<main class="hall">
+  <section>
+    <p class="eyebrow">The card — work called from GitHub</p>
+    <ul class="card" id="card"></ul>
+  </section>
+
+  <aside class="rail">
+    <section>
+      <p class="eyebrow">Plugged in</p>
+      <ul class="roster" id="roster"></ul>
+    </section>
+
+    <section class="picked" id="picked">
+      <p class="eyebrow" style="margin:0">Selected</p>
+      <p class="muted" id="picked-empty">Pick a job on the card to hand it to a client.</p>
+    </section>
+  </aside>
+</main>
+
+<script>
+  const HUB = "";                 // same origin — the hub serves this page
+  const POLL_MS = 2000;
+  const LEASABLE = "queued";
+  const DAUBED = new Set(["leased", "reported", "relayed"]);
+
+  let selectedId = null;
+
+  const el = {
+    card: document.getElementById("card"),
+    roster: document.getElementById("roster"),
+    tally: document.getElementById("tally"),
+    health: document.getElementById("health"),
+    picked: document.getElementById("picked"),
+  };
+
+  async function poll() {
+    try {
+      const [jobs, clients] = await Promise.all([
+        fetch(`${HUB}/jobs`).then((r) => r.json()),
+        fetch(`${HUB}/clients`).then((r) => r.json()),
+      ]);
+      setHealth(true);
+      renderCard(jobs);
+      renderRoster(clients);
+      renderTally(jobs, clients);
+    } catch {
+      setHealth(false);
+    }
+  }
+
+  function setHealth(live) {
+    el.health.dataset.live = String(live);
+    el.health.textContent = live ? "hub live" : "hub unreachable";
+  }
+
+  function renderTally(jobs, clients) {
+    const by = (state) => jobs.filter((j) => j.state === state).length;
+    const plugged = clients.filter((c) => c.status === "checked_in").length;
+    el.tally.innerHTML =
+      `queued <strong>${by("queued")}</strong> · ` +
+      `leased <strong>${by("leased")}</strong> · ` +
+      `relayed <strong>${by("relayed")}</strong> · ` +
+      `plugged in <strong>${plugged}</strong>`;
+  }
+
+  function renderCard(jobs) {
+    if (!jobs.length) {
+      el.card.innerHTML =
+        `<li class="empty">No work on the card yet. Open a pull request on a watched repo and it lands here.</li>`;
+      return;
+    }
+    el.card.innerHTML = jobs.map(cellFor).join("");
+    for (const button of el.card.querySelectorAll(".cell")) {
+      button.addEventListener("click", () => select(button.dataset.id, jobs));
+    }
+  }
+
+  function cellFor(job) {
+    const daubed = DAUBED.has(job.state);
+    const note = job.relay_error ? "relay failed" : job.state;
+    return `
+      <li>
+        <button class="cell" type="button"
+                data-id="${job.id}" data-state="${job.state}" data-daubed="${daubed}"
+                aria-pressed="${job.id === selectedId}">
+          <span class="cell-repo">${escapeHtml(job.repo_full_name)} #${job.pr_number}</span>
+          <span class="cell-title">${escapeHtml(job.pr_title || "untitled")}</span>
+          <span class="cell-foot">
+            <span>${job.head_sha.slice(0, 12)}</span>
+            <span class="cell-state">${escapeHtml(note)}</span>
+          </span>
+        </button>
+      </li>`;
+  }
+
+  function renderRoster(clients) {
+    if (!clients.length) {
+      el.roster.innerHTML = `<li class="muted">Nobody plugged in. Register a client and check in.</li>`;
+      return;
+    }
+    el.roster.innerHTML = clients
+      .map(
+        (c) => `
+        <li class="plug" data-status="${c.status}">
+          <span>${escapeHtml(c.name)}</span>
+          <span class="plug-spec">${escapeHtml(c.model_name)} · ${escapeHtml(c.provider)} · ${escapeHtml(c.tier)}</span>
+        </li>`,
+      )
+      .join("");
+  }
+
+  function select(id, jobs) {
+    selectedId = id;
+    const job = jobs.find((j) => j.id === id);
+    for (const button of el.card.querySelectorAll(".cell")) {
+      button.setAttribute("aria-pressed", String(button.dataset.id === id));
+    }
+
+    const leasable = job.state === LEASABLE;
+    el.picked.innerHTML = `
+      <p class="eyebrow" style="margin:0">Selected</p>
+      <p class="picked-id">${job.id}</p>
+      ${
+        leasable
+          ? `<p class="muted">Hand this to your MCP client:</p>
+             <code class="handoff" id="handoff">lease("${job.id}")</code>
+             <button class="copy" type="button" id="copy">Copy job id</button>`
+          : `<p class="muted">This job is <strong>${escapeHtml(job.state)}</strong>, so it can't be leased.
+             ${job.relay_error ? `Relay failed: ${escapeHtml(job.relay_error)}` : ""}</p>`
+      }`;
+
+    const copy = document.getElementById("copy");
+    if (copy) {
+      copy.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(job.id);
+        copy.textContent = "Copied";
+        setTimeout(() => (copy.textContent = "Copy job id"), 1400);
+      });
+    }
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(
+      /[&<>"']/g,
+      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+    );
+  }
+
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

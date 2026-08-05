@@ -4,3 +4,8 @@
 *.pem
 .env
 .env.*
+
+# client/ has no package tooling of its own — the scripts run via `uv run`,
+# so nothing else ignores its bytecode.
+__pycache__/
+.pytest_cache/

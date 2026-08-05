@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from review_bingo_hub.api import (
     clients,
+    dashboard,
     documents,
     health,
     jobs,
@@ -28,3 +29,4 @@ router.include_router(webhooks.router)
 router.include_router(clients.router)
 router.include_router(jobs.router)
 router.include_router(policies.router)
+router.include_router(dashboard.router)

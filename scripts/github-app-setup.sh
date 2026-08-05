@@ -53,8 +53,11 @@ if ! python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(open(sys.ar
   cp "$SOURCE" "$PEM_PATH"
 else
   echo "== Reading App manifest JSON: $SOURCE"
-  # Manifest carries everything; explicit flags still win if you pass them.
-  read -r JSON_APP_ID JSON_SECRET < <(python3 - "$SOURCE" "$PEM_PATH" <<'PY'
+  # Command substitution, not `read < <(...)`: a process substitution's exit
+  # status is invisible to `set -e`, so a python failure here would leave the
+  # id/secret empty and the script would carry on and write a broken .env
+  # (silently reusing a stale key from an earlier run).
+  MANIFEST_FIELDS="$(python3 - "$SOURCE" "$PEM_PATH" <<'PY'
 import json, pathlib, sys
 
 blob = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -64,11 +67,17 @@ if not pem:
 pathlib.Path(sys.argv[2]).write_text(pem if pem.endswith("\n") else pem + "\n")
 print(blob.get("id") or "-", blob.get("webhook_secret") or "-")
 PY
-  )
+)"
+  read -r JSON_APP_ID JSON_SECRET <<<"$MANIFEST_FIELDS"
+  # Manifest carries everything; explicit flags still win if you pass them.
   [[ -n "$APP_ID" ]] || APP_ID="$JSON_APP_ID"
   [[ -n "$WEBHOOK_SECRET" || "$JSON_SECRET" == "-" ]] || WEBHOOK_SECRET="$JSON_SECRET"
-  [[ "$APP_ID" != "-" ]] || { echo "manifest had no 'id' — pass --app-id" >&2; exit 2; }
 fi
+
+[[ -n "$APP_ID" && "$APP_ID" != "-" ]] || {
+  echo "no App ID resolved — pass --app-id, or check the manifest has an 'id'" >&2
+  exit 2
+}
 
 chmod 600 "$PEM_PATH"
 

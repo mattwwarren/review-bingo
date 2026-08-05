@@ -1,0 +1,6 @@
+# Secrets — the GitHub App private key lands in hub/.secrets/ (see
+# scripts/github-app-setup.sh). Belt-and-braces: hub/.gitignore also covers it.
+.secrets/
+*.pem
+.env
+.env.*

@@ -11,6 +11,10 @@ __pycache__/
 .env
 .env.*
 
+# GitHub App private key (scripts/github-app-setup.sh)
+.secrets/
+*.pem
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

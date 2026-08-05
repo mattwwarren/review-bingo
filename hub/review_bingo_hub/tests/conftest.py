@@ -39,6 +39,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from review_bingo_hub.core.auth import AuthMiddleware, CurrentUser, _parse_user_headers, get_user_from_headers
+from review_bingo_hub.core.config import settings
 from review_bingo_hub.core.tenants import TenantContext
 from review_bingo_hub.db import session as db_session
 from review_bingo_hub.db.session import create_session_maker, get_session
@@ -780,6 +781,21 @@ async def user_with_org(
 
     # Return user and org
     return test_user, test_organization
+
+
+@pytest.fixture(autouse=True)
+def isolate_github_app_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a developer's local .env out of the test suite.
+
+    Settings reads .env from the working directory, so a hub wired up for real
+    GitHub App traffic (scripts/github-app-setup.sh writes hub/.env) would
+    otherwise switch webhook signature verification and App-mode relay on for
+    every test — unsigned webhook fixtures start returning 401 and the relay
+    tries to reach api.github.com. Tests that want either must opt in.
+    """
+    monkeypatch.setattr(settings, "github_webhook_secret", None)
+    monkeypatch.setattr(settings, "github_app_id", None)
+    monkeypatch.setattr(settings, "github_app_private_key", None)
 
 
 @pytest.fixture(autouse=True)

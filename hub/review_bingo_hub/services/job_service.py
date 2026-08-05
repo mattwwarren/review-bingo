@@ -56,6 +56,23 @@ async def enqueue_job(
     return job
 
 
+async def cancel_queued_jobs_for_pr(session: AsyncSession, repo_full_name: str, pr_number: int) -> int:
+    """Cancel still-queued work for a PR, returning how many jobs were cancelled.
+
+    Called when a PR closes. Leased and reported jobs are deliberately left
+    alone: a round already in flight should finish and report rather than
+    vanish from under its client.
+    """
+    result = await session.execute(
+        update(ReviewJob)
+        .where(col(ReviewJob.repo_full_name) == repo_full_name)
+        .where(col(ReviewJob.pr_number) == pr_number)
+        .where(col(ReviewJob.state) == JobState.QUEUED.value)
+        .values(state=JobState.CANCELLED.value)
+    )
+    return result.rowcount or 0
+
+
 async def reclaim_expired_leases(session: AsyncSession) -> int:
     """Requeue leased jobs whose lease has lapsed; exhaust ones out of attempts."""
     now = datetime.now(UTC)

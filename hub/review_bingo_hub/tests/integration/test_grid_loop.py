@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 from http import HTTPStatus
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,17 @@ from httpx import AsyncClient
 from review_bingo_hub.core.config import settings
 
 PR_WEBHOOK_HEADERS = {"X-GitHub-Event": "pull_request"}
+
+# Captured from a real GitHub App delivery on 2026-08-04 (installation id redacted).
+# Kept verbatim rather than hand-written: a payload we invent agrees with whatever
+# we already believe about GitHub's shape, so it can never contradict us.
+CLOSED_DELIVERY_FIXTURE = Path(__file__).parents[1] / "fixtures" / "github" / "pull_request_closed.json"
+
+
+def closed_payload() -> dict[str, Any]:
+    """A fresh copy of the captured pull_request.closed delivery."""
+    payload: dict[str, Any] = json.loads(CLOSED_DELIVERY_FIXTURE.read_text())
+    return payload
 
 
 def pr_payload(
@@ -196,6 +208,71 @@ async def test_webhook_signature_enforced_when_secret_set(
     )
     assert response.status_code == HTTPStatus.OK
     assert response.json()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_closed_pr_cancels_its_queued_job(client: AsyncClient) -> None:
+    closed = closed_payload()
+    repo = closed["repository"]["full_name"]
+    number = closed["pull_request"]["number"]
+    sha = closed["pull_request"]["head"]["sha"]
+
+    response = await client.post(
+        "/webhooks/github",
+        json=pr_payload(repo=repo, number=number, sha=sha),
+        headers=PR_WEBHOOK_HEADERS,
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    response = await client.post("/webhooks/github", json=closed, headers=PR_WEBHOOK_HEADERS)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["cancelled"] == 1
+
+    response = await client.get(f"/jobs/{job_id}")
+    assert response.json()["state"] == "cancelled"
+
+    # The whole point: a client checking in afterwards must not be handed merged code.
+    _, headers = await register_and_check_in(client, "after-the-merge", "frontier")
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.json() is None
+
+
+@pytest.mark.asyncio
+async def test_closed_pr_leaves_a_round_already_in_flight_alone(client: AsyncClient) -> None:
+    """A leased job survives its PR closing — the holder still gets to report.
+
+    Guard test: cancellation targets QUEUED only, so this passes without any
+    further change. It exists to pin the boundary, not because it went red.
+    """
+    closed = closed_payload()
+    repo = closed["repository"]["full_name"]
+    number = closed["pull_request"]["number"]
+    sha = closed["pull_request"]["head"]["sha"]
+
+    await client.post(
+        "/webhooks/github",
+        json=pr_payload(repo=repo, number=number, sha=sha),
+        headers=PR_WEBHOOK_HEADERS,
+    )
+    _, headers = await register_and_check_in(client, "mid-flight", "frontier")
+    response = await client.post("/jobs/lease", headers=headers)
+    job_id = response.json()["job"]["id"]
+
+    response = await client.post("/webhooks/github", json=closed, headers=PR_WEBHOOK_HEADERS)
+    assert response.json()["cancelled"] == 0
+
+    response = await client.get(f"/jobs/{job_id}")
+    assert response.json()["state"] == "leased"
+
+    response = await client.post(
+        f"/jobs/{job_id}/report",
+        json={"verdict": "approve", "summary": "finished after the merge"},
+        headers=headers,
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["state"] == "relayed"
 
 
 @pytest.mark.asyncio

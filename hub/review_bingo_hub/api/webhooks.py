@@ -17,7 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.review_job import ReviewJobBase
-from review_bingo_hub.services.job_service import enqueue_job
+from review_bingo_hub.services.job_service import cancel_queued_jobs_for_pr, enqueue_job
 from review_bingo_hub.services.policy_service import get_policy
 
 LOGGER = logging.getLogger(__name__)
@@ -61,6 +61,24 @@ async def github_webhook(
 
     payload = await request.json()
     action = payload.get("action")
+
+    if action == "closed":
+        try:
+            repo_full_name = payload["repository"]["full_name"]
+            pr_number = payload["pull_request"]["number"]
+        except (KeyError, TypeError) as err:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Malformed pull_request payload",
+            ) from err
+        cancelled = await cancel_queued_jobs_for_pr(session, repo_full_name, pr_number)
+        await session.commit()
+        LOGGER.info(
+            "jobs_cancelled_on_pr_close",
+            extra={"repo": repo_full_name, "pr_number": pr_number, "cancelled": cancelled},
+        )
+        return {"status": "cancelled", "cancelled": cancelled}
+
     if action not in REVIEWABLE_ACTIONS:
         return {"status": "ignored", "reason": f"action {action!r} not reviewable"}
 

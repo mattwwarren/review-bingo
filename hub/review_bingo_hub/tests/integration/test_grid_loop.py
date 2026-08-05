@@ -4,6 +4,7 @@ Relay runs in log mode here (no GitHub App credentials in test settings), so
 the full loop exercises everything except the actual GitHub POST.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -273,6 +274,80 @@ async def test_closed_pr_leaves_a_round_already_in_flight_alone(client: AsyncCli
     )
     assert response.status_code == HTTPStatus.OK
     assert response.json()["state"] == "relayed"
+
+
+@pytest.mark.asyncio
+async def test_targeted_lease_hands_over_the_named_job(client: AsyncClient) -> None:
+    """Targeting takes the job you asked for, not the oldest one in the queue."""
+    older = await client.post("/webhooks/github", json=pr_payload(sha="target-older"), headers=PR_WEBHOOK_HEADERS)
+    wanted = await client.post(
+        "/webhooks/github", json=pr_payload(number=8, sha="target-wanted"), headers=PR_WEBHOOK_HEADERS
+    )
+    older_id = older.json()["job_id"]
+    wanted_id = wanted.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "picker", "frontier")
+    response = await client.post(f"/jobs/{wanted_id}/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease["job"]["id"] == wanted_id
+    assert lease["job"]["state"] == "leased"
+    assert lease["lease_expires_at"] is not None
+
+    response = await client.get(f"/jobs/{older_id}")
+    assert response.json()["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_targeted_lease_still_enforces_the_policy_floor(client: AsyncClient) -> None:
+    """Naming a job must not be a way around its repo's model floor."""
+    repo = "acme/vault"
+    await client.put(f"/policies/{repo}", json={"min_tier": "frontier"})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="floor-target"), headers=PR_WEBHOOK_HEADERS
+    )
+    job_id = response.json()["job_id"]
+
+    _, low_headers = await register_and_check_in(client, "toy-target", "experimental")
+    response = await client.post(f"/jobs/{job_id}/lease", headers=low_headers)
+    assert response.status_code == HTTPStatus.FORBIDDEN
+
+    response = await client.get(f"/jobs/{job_id}")
+    assert response.json()["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_targeted_lease_rejects_a_job_someone_else_holds(client: AsyncClient) -> None:
+    response = await client.post("/webhooks/github", json=pr_payload(sha="held-target"), headers=PR_WEBHOOK_HEADERS)
+    job_id = response.json()["job_id"]
+
+    _, holder = await register_and_check_in(client, "target-holder", "standard")
+    assert (await client.post(f"/jobs/{job_id}/lease", headers=holder)).status_code == HTTPStatus.OK
+
+    _, latecomer = await register_and_check_in(client, "target-latecomer", "standard")
+    response = await client.post(f"/jobs/{job_id}/lease", headers=latecomer)
+    assert response.status_code == HTTPStatus.CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_concurrent_targeted_leases_have_exactly_one_winner(client: AsyncClient) -> None:
+    response = await client.post("/webhooks/github", json=pr_payload(sha="race-target"), headers=PR_WEBHOOK_HEADERS)
+    job_id = response.json()["job_id"]
+
+    _, racer_a = await register_and_check_in(client, "racer-a", "frontier")
+    _, racer_b = await register_and_check_in(client, "racer-b", "frontier")
+
+    results = await asyncio.gather(
+        client.post(f"/jobs/{job_id}/lease", headers=racer_a),
+        client.post(f"/jobs/{job_id}/lease", headers=racer_b),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+    codes = sorted(r.status_code for r in results)  # type: ignore[union-attr]
+    assert codes == [HTTPStatus.OK, HTTPStatus.CONFLICT]
 
 
 @pytest.mark.asyncio

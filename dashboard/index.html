@@ -303,6 +303,9 @@
   const DAUBED = new Set(["leased", "reported", "relayed"]);
 
   let selectedId = null;
+  let latestJobs = [];
+  let pickedSignature = null;
+  const cellsById = new Map();   // job id -> its <li>, so cells are reused, not rebuilt
 
   const el = {
     card: document.getElementById("card"),
@@ -319,9 +322,18 @@
         fetch(`${HUB}/clients`).then((r) => r.json()),
       ]);
       setHealth(true);
+      latestJobs = jobs;
       renderCard(jobs);
       renderRoster(clients);
       renderTally(jobs, clients);
+
+      // Only redraw the selected panel when that job actually moved.
+      const picked = jobs.find((j) => j.id === selectedId);
+      const signature = picked ? `${picked.id}:${picked.state}:${picked.relay_error}` : null;
+      if (signature !== pickedSignature) {
+        pickedSignature = signature;
+        if (selectedId) renderPicked();
+      }
     } catch {
       setHealth(false);
     }
@@ -342,16 +354,64 @@
       `plugged in <strong>${plugged}</strong>`;
   }
 
+  /* Keyed update, not innerHTML replacement.
+     Rebuilding the whole card each poll re-ran the deal animation on every
+     cell twice a second, threw away keyboard focus, and could swap the node
+     out from under a tap. Cells are reused and mutated in place; only a job
+     seen for the first time gets built (and animated). */
   function renderCard(jobs) {
     if (!jobs.length) {
-      el.card.innerHTML =
-        `<li class="empty">No work on the card yet. Open a pull request on a watched repo and it lands here.</li>`;
+      if (!el.card.querySelector(".empty")) {
+        cellsById.clear();
+        el.card.innerHTML =
+          `<li class="empty">No work on the card yet. Open a pull request on a watched repo and it lands here.</li>`;
+      }
       return;
     }
-    el.card.innerHTML = jobs.map(cellFor).join("");
-    for (const button of el.card.querySelectorAll(".cell")) {
-      button.addEventListener("click", () => select(button.dataset.id, jobs));
+    const empty = el.card.querySelector(".empty");
+    if (empty) empty.remove();
+
+    const live = new Set();
+    jobs.forEach((job, index) => {
+      live.add(job.id);
+      let item = cellsById.get(job.id);
+      if (!item) {
+        item = buildCell(job);
+        cellsById.set(job.id, item);
+      }
+      updateCell(item.querySelector(".cell"), job);
+      // Move only if this cell is not already in the right slot. Re-inserting
+      // an attached node blurs it, so an unconditional appendChild would drop
+      // keyboard focus on every poll.
+      const occupant = el.card.children[index];
+      if (occupant !== item) el.card.insertBefore(item, occupant || null);
+    });
+
+    for (const [id, item] of cellsById) {
+      if (!live.has(id)) {
+        item.remove();
+        cellsById.delete(id);
+      }
     }
+  }
+
+  function buildCell(job) {
+    const item = document.createElement("li");
+    item.innerHTML = cellFor(job);
+    item.querySelector(".cell").addEventListener("click", () => select(job.id));
+    return item;
+  }
+
+  /* Touch only what changed, so a cell whose state is stable is left alone. */
+  function updateCell(cell, job) {
+    const note = job.relay_error ? "relay failed" : job.state;
+    const daubed = String(DAUBED.has(job.state));
+    if (cell.dataset.state !== job.state) cell.dataset.state = job.state;
+    if (cell.dataset.daubed !== daubed) cell.dataset.daubed = daubed;
+    const label = cell.querySelector(".cell-state");
+    if (label.textContent !== note) label.textContent = note;
+    const pressed = String(job.id === selectedId);
+    if (cell.getAttribute("aria-pressed") !== pressed) cell.setAttribute("aria-pressed", pressed);
   }
 
   function cellFor(job) {
@@ -388,11 +448,24 @@
       .join("");
   }
 
-  function select(id, jobs) {
+  function select(id) {
     selectedId = id;
-    const job = jobs.find((j) => j.id === id);
     for (const button of el.card.querySelectorAll(".cell")) {
       button.setAttribute("aria-pressed", String(button.dataset.id === id));
+    }
+    renderPicked();
+  }
+
+  /* Redrawn on selection and whenever the selected job's own state moves —
+     a job that gets leased while you're looking at it should stop offering
+     a lease call. */
+  function renderPicked() {
+    const job = latestJobs.find((j) => j.id === selectedId);
+    if (!job) {
+      el.picked.innerHTML =
+        `<p class="eyebrow" style="margin:0">Selected</p>
+         <p class="muted" id="picked-empty">Pick a job on the card to hand it to a client.</p>`;
+      return;
     }
 
     const leasable = job.state === LEASABLE;

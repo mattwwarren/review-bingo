@@ -11,6 +11,11 @@ set -euo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 HUB_PORT="${HUB_PORT:-7575}"
+# Localhost by default. HUB_HOST=0.0.0.0 puts the hub on the LAN so another
+# device (a phone, a laptop across the room) can open the dashboard — but the
+# hub has no auth, so anything on that network can also post webhooks, register
+# clients, and lease jobs. Opt in deliberately; don't make it the default.
+HUB_HOST="${HUB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-55433}"
 PG_IMAGE="${PG_IMAGE:-postgres:18.1-alpine}"
 PG_CONTAINER="bingo-dev-pg"
@@ -63,8 +68,22 @@ else
   echo "   webhook signatures: SKIPPED — any caller can enqueue jobs"
 fi
 
-say "Hub on :$HUB_PORT — Ctrl-C stops it (Postgres stays up)"
+say "Hub on $HUB_HOST:$HUB_PORT — Ctrl-C stops it (Postgres stays up)"
 cat <<EOF
+   Dashboard:
+     http://localhost:$HUB_PORT/dashboard
+EOF
+if [[ "$HUB_HOST" != "127.0.0.1" && "$HUB_HOST" != "localhost" ]]; then
+  LAN_IP="$(ip -4 -o addr show scope global 2>/dev/null | awk 'NR==1{split($4, a, "/"); print a[1]}')"
+  cat <<EOF
+     http://${LAN_IP:-<this-machine>}:$HUB_PORT/dashboard   (other devices on this network)
+
+   Reachable from the LAN, and the hub has no auth — anything on this network
+   can enqueue jobs and lease work. Fine at home; not on shared wifi.
+EOF
+fi
+cat <<EOF
+
    Point the App's webhook at your tunnel:
      ngrok http $HUB_PORT
      webhook URL = https://<your-ngrok-host>/webhooks/github
@@ -75,4 +94,4 @@ cat <<EOF
 EOF
 
 cd hub
-exec uv run uvicorn review_bingo_hub.main:app --port "$HUB_PORT" ${HUB_RELOAD:+--reload}
+exec uv run uvicorn review_bingo_hub.main:app --host "$HUB_HOST" --port "$HUB_PORT" ${HUB_RELOAD:+--reload}

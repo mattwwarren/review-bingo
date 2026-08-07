@@ -1,5 +1,18 @@
 # Project configuration for review-bingo.
 #
+# tracking.primary.system is REQUIRED, not decorative: /auto-dev's tracker
+# resolution defaults to `linear` when the key is absent, so omitting it sends
+# workers hunting for GitHub issue numbers in the wrong tracker.
+
+tracking:
+  primary:
+    system: github-issues
+    tool: gh
+    scope: "all work — the sprint milestone, bugs, and tech debt"
+    auto_create_issues: false
+    auto_close_on_complete: true
+
+#
 # sprint_buildout records the issue-shaping conventions `cw sprint plan|apply`
 # transcribes, so buildout is transcription rather than archaeology across
 # prior issues. See claude-workspace's config/CONFIG_REFERENCE.md for the

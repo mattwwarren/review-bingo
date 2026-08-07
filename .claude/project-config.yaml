@@ -1,0 +1,21 @@
+# Project configuration for review-bingo.
+#
+# sprint_buildout records the issue-shaping conventions `cw sprint plan|apply`
+# transcribes, so buildout is transcription rather than archaeology across
+# prior issues. See claude-workspace's config/CONFIG_REFERENCE.md for the
+# full block shape.
+
+sprint_buildout:
+  milestone:
+    title_pattern: "v{version} — {rfc_title}"
+  epic:
+    title_pattern: "epic: {name}"
+    labels: []
+    children_marker: "<!-- children -->"
+  ticket:
+    title_pattern: "RFC {rfc_num} {code} — {name}"
+    # `enhancement` is a GitHub default label and exists in this repo; there is
+    # no `feature` label here, and issue creation fails on an unknown label.
+    labels: [enhancement]
+    footer_pattern: "Part of RFC {rfc_num} Wave {wave} (Sprint {sprint})"
+    footer_epic_clause: ", Epic #{epic}"

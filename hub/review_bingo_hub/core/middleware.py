@@ -3,6 +3,7 @@
 Provides cross-cutting middleware for:
 - Request payload size validation
 - Request/response logging
+- Deny-by-default token presence gate
 - Error handling
 - Performance monitoring
 """
@@ -23,6 +24,13 @@ LOGGER = logging.getLogger(__name__)
 # Constants
 MAX_REQUEST_SIZE_BYTES_DEFAULT = 50 * 1024 * 1024
 ERROR_STATUS_CODE_THRESHOLD = 400
+
+# The complete set of paths reachable without an Authorization header.
+# Deliberately a fixed constant rather than configuration: an allowlist that
+# can be widened from a .env file is an allowlist an operator can widen by
+# accident, and "which paths are open" is a property of the service's design,
+# not of a deployment.
+PUBLIC_PATHS: frozenset[str] = frozenset({"/health", "/ping", "/webhooks/github", "/dashboard"})
 
 
 class RequestSizeValidationMiddleware(BaseHTTPMiddleware):
@@ -183,3 +191,76 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         )
 
         return response
+
+
+class RequireTokenMiddleware(BaseHTTPMiddleware):
+    """Deny-by-default gate: unauthenticated requests to non-public paths get 401.
+
+    Every path is closed unless it appears in PUBLIC_PATHS. This inverts the
+    hub's previous posture, where a route was open unless someone remembered
+    to guard it - a default that fails silently in exactly the direction you
+    do not want.
+
+    What "has a token" means here:
+        The Authorization header is present and non-empty. That is the whole
+        check. Any scheme, any value.
+
+    What it does NOT mean:
+        This middleware does not validate anything. It never answers "is this
+        token real" - only "is there something to check". Per-route validity
+        stays exactly where it already lives: ClientDep/get_current_client for
+        client tokens, verify_signature for webhook HMAC. A future device-flow
+        ticket slots real validation into that layer, not this one.
+
+    Configuration:
+        None. PUBLIC_PATHS is a fixed constant, not a setting.
+
+    Examples:
+        # In main.py
+        from review_bingo_hub.core.middleware import RequireTokenMiddleware
+        app.add_middleware(RequireTokenMiddleware)
+
+    Security Notes:
+        - PUBLIC_PATHS is matched EXACTLY, never by prefix. A prefix match
+          would make "/health" open up "/health/../admin" and every future
+          sub-path nobody re-reviewed; an exact set can only be widened on
+          purpose, in a diff.
+        - "/docs" and "/openapi.json" are deliberately absent: the schema
+          enumerates every route and its payload shape, which is the first
+          thing worth withholding from an unauthenticated caller.
+        - "/metrics" is deliberately absent for the same reason.
+        - "/webhooks/github" is public here because it authenticates by HMAC
+          signature inside the handler, not by a bearer token. Removing it
+          from the allowlist would break GitHub delivery, not harden it.
+        - OPTIONS is always allowed through: CORS preflight carries no
+          Authorization header by specification, so gating it would break
+          every cross-origin call before the real request was ever made.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        """Reject requests to non-public paths that carry no Authorization header.
+
+        Args:
+            request: Incoming HTTP request
+            call_next: Next middleware in chain
+
+        Returns:
+            Response from endpoint, or 401 if the gate denies the request
+        """
+        if request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        if not request.headers.get("authorization"):
+            LOGGER.warning(
+                "request_denied_no_token",
+                extra={
+                    "path": request.url.path,
+                    "method": request.method,
+                },
+            )
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Authentication required"},
+            )
+
+        return await call_next(request)

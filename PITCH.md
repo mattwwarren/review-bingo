@@ -60,8 +60,13 @@ session/orchestration thinking.
 ## Open design questions (the levers)
 
 - What is "a round of reviews" — one pass? N autonomous cycles? until quiet?
-- Merging/deduping when multiple clients review the same PR — who wins,
-  how are findings aggregated, is there a quorum/verify step?
+- ~~Merging/deduping when multiple clients review the same PR — who wins,
+  how are findings aggregated, is there a quorum/verify step?~~
+  **Resolved (D-ONEJOB):** one job per PR head stands — multiple clients
+  buy throughput across different PRs, not depth on one. No quorum, no
+  finding-level dedup, no multi-round comment; `enqueue_job`'s existing
+  dedup on `(repo_full_name, pr_number, head_sha)` is intended behavior,
+  not a limitation. See [RFC 0001](docs/superpowers/specs/2026-08-07-github-identity-grid-design.md#resolved-decisions), issue #19.
 - Trust and quality weighting across heterogeneous clients (a turbo-quant
   local model vs. a frontier model shouldn't be weighted identically).
 - Registration scope: org-level fleet vs. individual volunteers, auth model.
@@ -104,5 +109,6 @@ earns its keep.
    the whole loop offline.
 5. Register the GitHub App (webhook → hub) against a test repo and run a
    real PR through the grid.
-6. Aggregation: decide what happens when multiple clients report rounds on
-   the same PR (today: one job per PR head, first lease wins).
+6. ~~Aggregation: decide what happens when multiple clients report rounds
+   on the same PR~~ — resolved: one job per PR head stands (D-ONEJOB), no
+   merge/dedup/quorum machinery. See [RFC 0001](docs/superpowers/specs/2026-08-07-github-identity-grid-design.md#resolved-decisions), issue #19.

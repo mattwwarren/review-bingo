@@ -67,25 +67,38 @@ the ticket — a partial step gets `Refs #N` so the issue survives the merge.
 
 ## Step 4: Auto-merge
 
-Auto-merge is **off** at the repo level (`allow_auto_merge: false`) and `main`
-has no branch protection. Both facts matter:
-
-- With no required checks, auto-merge has nothing to wait for — enabling it
-  merges the PR essentially immediately, before CI reports.
-- So this command does **not** enable auto-merge by default.
+Arm it:
 
 ```bash
-gh pr merge --auto --squash    # only when the operator has asked for it
+gh pr merge --auto --squash
 ```
 
-If `/prep-pr` Step 9 runs `verify --require-automerge`, it will fail here. That
-failure is accurate — report it as "auto-merge deliberately not enabled; repo
-setting is off and main is unprotected", do not paper over it by flipping the
-repo setting to make a check pass.
+Both preconditions this step used to wait on are now met (2026-08-07):
 
-To make auto-merge meaningful later: enable `allow_auto_merge` **and** add
-branch protection on `main` requiring the `CI` check. Until both exist,
-merging is a human step.
+- `allow_auto_merge` is enabled at the repo level.
+- `main` has an active ruleset requiring the `Tests (hub)` check, with
+  squash-only merges, linear history, and no bypass actors.
+
+So auto-merge has something real to wait for. It fires when `Tests (hub)`
+reports green, not on creation. Squash is the only method the ruleset permits —
+passing `--merge` or `--rebase` will be rejected.
+
+Earlier revisions of this file said the opposite, and said so for a good
+reason: with no required checks, arming auto-merge merges a PR essentially
+immediately, before CI reports anything. That reasoning was correct while it
+held. It stopped holding when the ruleset landed, and a stale instruction here
+is expensive — issue #19 shipped a correct PR (#28) that then sat unmerged with
+green checks, because the worker read this step and declined to arm.
+
+Two things worth knowing, since neither is obvious from a green PR:
+
+- The ruleset requires only `Tests (hub)`. `Lint & type-check (hub)` runs and
+  reports but **cannot block a merge**, so a ruff or mypy failure will not stop
+  auto-merge. Do not treat "auto-merge fired" as evidence the lint gate passed;
+  read it.
+- `delete_branch_on_merge` is off, so merged branches persist. `cw worktree gc
+  --apply` prunes worktrees whose PR merged; the branches themselves need
+  `--delete-branch` at merge time or manual cleanup.
 
 ## Step 5: Register the review monitor
 

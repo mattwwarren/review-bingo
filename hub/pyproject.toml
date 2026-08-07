@@ -119,6 +119,13 @@ source = ["review_bingo_hub"]
 concurrency = ["greenlet", "thread"]
 omit = [
     "review_bingo_hub/tests/*",
+    # RFC 0001 S1 unwired these routers from the app. The modules stay on
+    # disk pending the repo-scoped rewrite, but no request can reach them,
+    # so their line counts would otherwise drag the gate below its floor.
+    "review_bingo_hub/api/organizations.py",
+    "review_bingo_hub/api/memberships.py",
+    "review_bingo_hub/api/documents.py",
+    "review_bingo_hub/api/admin.py",
 ]
 
 [tool.coverage.report]

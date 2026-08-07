@@ -1,7 +1,9 @@
-# GitHub-derived identity and repo-scoped authorization
+# RFC 0001 — GitHub-derived identity and repo-scoped authorization
 
 **Date:** 2026-08-07
-**Status:** approved design, not yet ticketed
+**Status:** approved design
+**Milestone:** [v0.1.0](https://github.com/mattwwarren/review-bingo/milestone/2)
+**Issues:** epics #15, #16 · tickets S1 #17, S2 #18, S3 #19, A1 #20, A2 #21, A3 #22, A4 #23, B1 #24, B2 #25 · pulled in #11
 **Supersedes:** the "hub has no auth" framing in `.handoffs/handoff-2026-08-06-0221.md`
 
 ## Why
@@ -42,9 +44,9 @@ model we invent is a second, staler copy of that.
 An enrolment secret, by contrast, only decides who gets to hold the firehose. It
 leaves the invariant violated.
 
-## Decisions
+## Resolved decisions
 
-**One job per PR head stands.** Multiple clients mean throughput across
+- **D-ONEJOB — One job per PR head stands.** Multiple clients mean throughput across
 different PRs, not depth on one. This closes the PITCH open question about
 aggregation and dedup by deciding it away rather than building merge machinery:
 no quorum, no finding-level dedup, no multi-round comment. `enqueue_job`'s
@@ -53,18 +55,18 @@ existing dedup on `(repo_full_name, pr_number, head_sha)`
 lift. PITCH.md's open-questions list and next-step 6 should be updated to record
 this.
 
-**Authorization is derived from GitHub, not issued by the hub.** Enrolment
+- **D-GHAUTH — Authorization is derived from GitHub, not issued by the hub.** Enrolment
 requires a GitHub user access token obtained through the App's device flow.
 Dispatch, job reads, the client roster, and policy writes are all scoped by what
 GitHub reports that user can access.
 
-**The network boundary stays, demoted to defence-in-depth.** Public ingress
+- **D-NET — The network boundary stays, demoted to defence-in-depth.** Public ingress
 terminates exactly one path — `/webhooks/github` — because GitHub must reach it
 and HMAC already authenticates it. Everything else binds to a private interface.
 This is no longer what makes the design correct; it is what contains the blast
 radius when something else is wrong. It also ends the ngrok dependency.
 
-**Deny by default at the application layer, too.** A `RequireTokenMiddleware`
+- **D-DENY — Deny by default at the application layer, too.** A `RequireTokenMiddleware`
 rejects anything not on an explicit public allowlist: `/health`, `/ping`,
 `/webhooks/github`, and the `/dashboard` static shell (which carries no data;
 prompting inside a loaded page beats a blank 401). `/docs` and `/openapi.json`
@@ -74,12 +76,21 @@ exposure: a `HUB_HOST=0.0.0.0` left in a shell, a VPN route that does not
 survive a reboot, a firewall rule edited at 1am. The middleware turns that class
 of mistake into a 401 instead of a data leak.
 
-**Subtract before adding.** Remove `organizations`, `memberships`, `documents`,
+- **D-SUB — Subtract before adding.** Remove `organizations`, `memberships`, `documents`,
 and both `/_admin` routers from `api/routes.py` and `main.py`. review-bingo has
 no user accounts, no document storage, and no Kratos. Deleting them removes more
 attack surface than any middleware adds, and it keeps the public allowlist small
 enough to review at a glance. The modules stay on disk untouched, so a future
 multi-tenant pivot re-includes a router rather than rebuilding one.
+
+- **D-DEVICE — Enrolment uses the App's device flow, and the hub stores no GitHub credential.** The CLI holds its own user token client-side and presents it at enrolment and check-in; the hub reads identity and access from it, then discards it. Only `client_id` is needed, which is not a secret. The dashboard cannot poll GitHub's token endpoint from the browser (no CORS headers), so the hub brokers that flow and mints its own short-lived session token.
+- **D-IDENT — Identity is its own row, not columns on `review_client`.** A CLI client and a dashboard session need the same "who is this and what can they read", so `github_identity` plus `identity_repo_access` is shared by both. Many clients may point at one identity; refreshing it updates all of them at once.
+- **D-TTL — Cached access expires on a TTL, defaulting to 8 hours.** `github_identity.access_refreshed_at` past `IDENTITY_ACCESS_TTL_SECONDS` means the hub refuses to lease and asks for a fresh check-in. Matching the GitHub user token's own default lifetime keeps the two from drifting apart.
+- **D-404 — An out-of-access job is 404, never 403.** A 403 confirms the job exists; job ids plus a 403/404 split turn the endpoint into an oracle for "does this private repo have an open PR right now". Below-tier inside the access set stays 403, because there the explanation is the caller's to have.
+- **D-ROSTER — The client roster is scoped to overlap.** `GET /clients` returns clients sharing at least one accessible repo with the caller, plus the caller's own — not a directory of who is on the grid and what hardware they run.
+- **D-POLICY — Policy writes require repo admin, as reported by GitHub.** Whoever GitHub says administers a repo may set that repo's model floor. No admin token, no new role concept, no second source of truth.
+- **D-DEVMODE — Offline paths live behind one named mode, not scattered branches.** `CLIENT_ENROLMENT_MODE` defaults to `github`; the secret-based enrolment path and the dev policy-write path exist only under `dev`, and the hub logs loudly at startup when the mode is not `github`. A bypass that can be switched on silently is the entire failure mode of this feature.
+- **D-MIGRATE — Existing clients re-enrol; nothing is backfilled.** `review_client.identity_id` is nullable and a client without an identity never leases, which is the correct answer rather than a special case. There is no honest way to invent a GitHub identity for the existing `demo-workstation` row.
 
 ## Rejected alternatives
 
@@ -95,7 +106,7 @@ multi-tenant pivot re-includes a router rather than rebuilding one.
 - **Single flat public grid.** One ingress, no VPN, but every client can read
   every job. Expensive to walk back once people rely on the open read surface.
 
-## Architecture
+## Design
 
 ### Enrolment — two flows
 
@@ -198,7 +209,7 @@ The dashboard stops being a god view. It shows the jobs, clients, and policies
 of whoever is logged into it. On a one-person grid that is invisible; the moment
 a teammate opens it, it is the whole point.
 
-## Failure modes
+### Failure modes
 
 **GitHub unavailable at enrolment:** fail closed. No identity, no client.
 
@@ -221,7 +232,7 @@ returned interval, not retrying harder.
 **Rate limits** are not a concern: two calls per check-in against a per-user
 5000/hour budget.
 
-## Dev mode
+### Dev mode
 
 Tests, `scripts/demo.sh`, and the tier demo cannot reach GitHub.
 `CLIENT_ENROLMENT_MODE` defaults to `github`; a secret-based path exists only
@@ -234,7 +245,7 @@ permission to consult, so `PUT /policies/{owner}/{repo}` accepts the enrolment
 secret in place of a repo-admin check. Same switch, same startup warning — one
 named mode, not a second bypass with its own rules.
 
-## Migration
+### Migration
 
 `review_client.identity_id` is nullable, and a client with no identity never
 leases — the dispatch filter has nothing to match against, which is the correct
@@ -243,7 +254,7 @@ GitHub identity and there is no honest way to invent one, so it re-enrols
 through the new flow. Sixteen job rows on a laptop database do not justify a
 data-migration story.
 
-## Testing
+### Testing
 
 GitHub calls go behind one seam — a `github_identity` service — so tests inject
 a fake instead of scattering httpx mocks across the suite.
@@ -265,42 +276,147 @@ grows: it must now also pin `CLIENT_ENROLMENT_MODE`. A dev `.env` bleeding into
 the suite is exactly how webhook signature verification once switched itself on
 mid-test-run and broke seven tests.
 
-## Work items
+### Epic I — Identity and repo-scoped authorization
 
-Each is independently landable, in this order.
+Everything that makes the invariant true: who a client is, what GitHub says they
+can read, and every place the hub must consult that before handing something
+over. Enrolment, re-attestation, dispatch filtering, and policy authorization
+land here. The epic is complete when no endpoint serves data the caller's GitHub
+access does not already entitle them to.
 
-1. **Subtract unused routers.** Remove `organizations`, `memberships`,
-   `documents`, and both `/_admin` routers from `api/routes.py` and `main.py`.
-   Modules stay on disk. *Done when:* those paths 404 and the suite is green.
-2. **Deny-by-default middleware.** `RequireTokenMiddleware` with the explicit
-   public allowlist. *Done when:* an unauthenticated request to any non-allowlisted
-   path gets 401, and a test asserts the allowlist contents so adding a route
-   cannot silently widen it.
-3. **GitHub identity service and enrolment.** `GITHUB_APP_CLIENT_ID` config, the
-   `github_identity` seam, device-flow enrolment on `POST /clients`, schema
-   changes and migration, `CLIENT_ENROLMENT_MODE`. *Done when:* a real client
-   enrols via device flow and its access set is populated.
-4. **Check-in re-attestation and staleness TTL.** *Done when:* removing a
-   collaborator's repo access removes their ability to lease that repo's jobs
-   after the next check-in, and a stale client is refused.
-5. **Repo-scoped dispatch and job reads,** including the 404-not-403 rule.
-   *Done when:* the security tests above pass.
-6. **Policy authorization from repo admin permission.** *Done when:* a
-   non-admin's `PUT /policies` is rejected and an admin's succeeds.
-7. **Dashboard session via brokered device flow.** `POST /auth/device/start`,
-   `POST /auth/device/poll`, session table, and the dashboard's login prompt
-   with `localStorage` persistence. *Done when:* the dashboard shows only what
-   the logged-in user can see.
-8. **Tier-floor demo.** `scripts/demo-tiers.sh` registers a frontier and an
-   experimental client in dev mode, sets a repo floor, and shows the
-   experimental client getting nothing from `/jobs/lease` and a 403 from the
-   targeted lease while the frontier client takes the job. The same assertions
-   land in `tests/integration/` so CI runs them — a demo script nobody executes
-   rots, and this is the only evidence the pitch's one policy lever works.
-9. **Client CI (existing issue #11).** This sprint puts real logic in `client/`
-   — device flow, token handling, the login command — and root CI runs
-   `working-directory: hub`, so none of it would run. Lint, type-check, and test
-   coverage for `client/` folds into this sprint rather than staying a loose end.
+### Epic II — Surfaces and proof
+
+The parts a human touches, and the evidence the policy works. The dashboard
+stops being a god view and gets its own login; the tier floor — the pitch's one
+hub-side policy lever, never yet demonstrated — gets a repeatable demo whose
+assertions run in CI.
+
+## Tickets
+
+### S1 — Remove the unused open routers
+
+- **Epic:** none
+- **Wave:** 0
+- **Sprint:** 0
+- **Depends on:** none
+- **Context:** `organizations.py`, `memberships.py`, and `documents.py` came from fastapi-template, are wired into `api/routes.py`, carry no authentication dependency of any kind, and are unused by review-bingo; `documents.py` is a file-upload surface. `/_admin/internal/*` and `/_admin/webhooks/kratos/*` are unauthenticated by design and rely on a Traefik that does not exist in this deployment. Deleting them removes more attack surface than any middleware adds and keeps the later public allowlist small enough to review at a glance.
+- **Scope:** D-SUB
+- **Acceptance:**
+  - Those routers are no longer included in `api/routes.py` or `main.py`, and their paths return 404.
+  - The module files remain on disk, unmodified, so a future multi-tenant pivot re-includes a router rather than rebuilding one.
+  - The hub suite passes, with any tests covering the removed routes deleted rather than skipped.
+
+### S2 — Deny-by-default request middleware
+
+- **Epic:** none
+- **Wave:** 0
+- **Sprint:** 0
+- **Depends on:** S1
+- **Context:** The hub currently authenticates only the client spine and webhooks; everything else is open, and the network boundary that will front it fails silently and in the direction of exposure. A `RequireTokenMiddleware` that rejects anything not on an explicit public allowlist turns a VPN misconfiguration or a stray `HUB_HOST=0.0.0.0` into a 401 instead of a data leak.
+- **Scope:** D-DENY, D-NET
+- **Acceptance:**
+  - An unauthenticated request to any path not on the allowlist returns 401.
+  - The allowlist is exactly `/health`, `/ping`, `/webhooks/github`, and the `/dashboard` static shell; `/docs` and `/openapi.json` are not public.
+  - A test asserts the allowlist's contents, so adding a route cannot silently widen the public surface.
+
+### S3 — Record the aggregation decision in PITCH.md
+
+- **Epic:** none
+- **Wave:** 0
+- **Sprint:** 0
+- **Depends on:** none
+- **Context:** PITCH.md still carries "merging/deduping when multiple clients review the same PR" as an open design question and lists aggregation as next-step 6, but the decision is made: one job per PR head stands, so multiple clients mean throughput across PRs rather than depth on one. Leaving the question open in the pitch invites the next contributor to design machinery this sprint deliberately declined to build.
+- **Scope:** D-ONEJOB
+- **Acceptance:**
+  - PITCH.md's open-questions list records the resolution rather than posing the question.
+  - Next-step 6 is marked resolved with a pointer to this RFC.
+  - The existing dedup behavior in `services/job_service.py` is described as intended, not as a limitation.
+
+### A1 — GitHub identity service and device-flow enrolment
+
+- **Epic:** I
+- **Wave:** 1
+- **Sprint:** 1
+- **Depends on:** S2
+- **Context:** Enrolment is open today — anyone who can reach the hub self-registers and receives a bearer token. This ticket makes admission derive from GitHub: the client obtains a user access token through the App's device flow and presents it to `POST /clients`, and the hub reads identity and repo access from it and then discards it. This is the foundation every other Epic I ticket filters on, and it introduces the `github_identity` seam that keeps GitHub calls testable.
+- **Scope:** D-GHAUTH, D-DEVICE, D-IDENT, D-DEVMODE, D-MIGRATE
+- **Acceptance:**
+  - `GITHUB_APP_CLIENT_ID` is configurable and device flow is enabled on the App; the client obtains a user token without any client secret.
+  - `github_identity` and `identity_repo_access` exist with a migration, and `review_client.identity_id` is a nullable foreign key.
+  - Enrolment populates identity and the repo access set including each repo's permission level, and the hub persists no GitHub token.
+  - `CLIENT_ENROLMENT_MODE` defaults to `github`, the secret path exists only under `dev`, and the hub logs loudly at startup when the mode is not `github`.
+  - GitHub calls sit behind one injectable seam so tests use a fake rather than scattered httpx mocks.
+
+### A2 — Check-in re-attestation and access staleness
+
+- **Epic:** I
+- **Wave:** 2
+- **Sprint:** 1
+- **Depends on:** A1
+- **Context:** A cached access set goes wrong the moment someone loses repo access, and nothing tells the hub. Check-in is already the grid's availability signal, which makes it the natural refresh point, and the GitHub user token's 8-hour default lifetime is roughly the same cadence. Without a TTL the hub would serve authorization decisions from data of unbounded age.
+- **Scope:** D-TTL
+- **Acceptance:**
+  - Check-in accepts a fresh GitHub token and refreshes the identity's access set and `access_refreshed_at`.
+  - A repo added to a user's access appears after the next check-in; a repo removed disappears.
+  - Leasing is refused once `access_refreshed_at` is older than `IDENTITY_ACCESS_TTL_SECONDS`, with a response that says to check in again.
+  - A GitHub outage during check-in keeps the existing access set until the TTL expires rather than locking the grid out immediately.
+
+### A3 — Repo-scoped dispatch, job reads, and roster
+
+- **Epic:** I
+- **Wave:** 2
+- **Sprint:** 1
+- **Depends on:** A1
+- **Context:** This is where the invariant becomes true for the data plane. Dispatch and every job read gain the access-set filter, and the targeted-lease path's error codes stop leaking existence: a 403 on an out-of-access job would confirm that job exists, turning the endpoint into an oracle for whether a private repo has an open PR. The roster stops publishing a directory of everyone on the grid and their hardware.
+- **Scope:** D-GHAUTH, D-404, D-ROSTER
+- **Acceptance:**
+  - `lease_next_job` and `lease_specific_job` filter to the caller's access set in addition to the existing tier floor, leaving lease reclamation and attempt counting untouched.
+  - `GET /jobs` returns only jobs in the caller's access set; `GET /jobs/{id}`, `/comment`, and `/relay-target` return 404 for anything outside it.
+  - A targeted lease on an out-of-access job returns 404, and a security test asserts it is indistinguishable from a nonexistent job.
+  - A targeted lease on an in-access job above the caller's tier still returns 403 with its explanatory message.
+  - `GET /clients` returns only clients sharing at least one accessible repo with the caller, plus the caller's own.
+
+### A4 — Policy writes require repo admin
+
+- **Epic:** I
+- **Wave:** 2
+- **Sprint:** 1
+- **Depends on:** A1
+- **Context:** `PUT /policies/{owner}/{repo}` is world-writable, so the per-repo model floor — the one review-config knob the pitch reserves for the hub — can be lowered by anyone who can reach it. GitHub already knows who administers a repo, and that permission level arrives with the repo listing at enrolment, so the check needs no extra API call and no hub-side role concept.
+- **Scope:** D-POLICY, D-DEVMODE
+- **Acceptance:**
+  - `PUT /policies/{owner}/{repo}` succeeds only when the caller's cached access for that repo is `admin`.
+  - A caller with `write` or `read` on the repo is rejected, as is a caller with no access.
+  - `GET /policies` returns only policies for repos the caller can see.
+  - Under `dev` enrolment mode the write accepts the enrolment secret in place of the admin check, behind the same named mode and startup warning.
+
+### B1 — Dashboard login and scoped views
+
+- **Epic:** II
+- **Wave:** 2
+- **Sprint:** 2
+- **Depends on:** A1, A3
+- **Context:** Once reads require a token the dashboard needs an identity of its own, and browser JavaScript cannot poll GitHub's token endpoint because it sends no CORS headers. The hub therefore brokers the device flow and mints its own short-lived session token. The visible consequence is intended: the dashboard stops being a god view and shows only what the logged-in user can see.
+- **Scope:** D-DEVICE, D-IDENT
+- **Acceptance:**
+  - `POST /auth/device/start` returns a user code and verification URI; `POST /auth/device/poll` completes the flow server-side.
+  - On success the hub mints a short-lived dashboard session bound to a `github_identity` and discards the GitHub token.
+  - The dashboard prompts for login once, persists the session token in `localStorage`, and recovers cleanly when it expires.
+  - Job, roster, and policy views show only what the logged-in identity may see, and the existing poll loop still preserves focus and selection.
+
+### B2 — Tier-floor demo with CI assertions
+
+- **Epic:** II
+- **Wave:** 3
+- **Sprint:** 2
+- **Depends on:** A3
+- **Context:** Tier floors are implemented and have never been demonstrated with more than one client, which makes the pitch's only hub-side policy lever the least-evidenced part of the system. A script alone rots because nobody runs it, so the same assertions belong in the integration suite where CI executes them on every change.
+- **Scope:** D-DEVMODE
+- **Acceptance:**
+  - `scripts/demo-tiers.sh` registers a frontier and an experimental client in dev enrolment mode and sets a repo floor above experimental.
+  - The experimental client receives nothing from `/jobs/lease` and a 403 from the targeted lease, while the frontier client leases the same job successfully.
+  - Equivalent assertions live in `hub/review_bingo_hub/tests/integration/` and run in CI.
+  - The script runs offline with no GitHub credentials.
 
 ## Out of scope
 
@@ -313,6 +429,10 @@ Each is independently landable, in this order.
 - Standing up the stable public ingress that replaces ngrok. The design needs
   *a* public hostname for webhooks; choosing and deploying it is separate
   infrastructure work and deserves its own ticket.
+- Filing client-side CI as a new ticket. This work puts real logic in `client/`
+  — device flow, token handling, a login command — and root CI runs
+  `working-directory: hub`, so none of it would run. That gap is already tracked
+  by issue #11, which is pulled into this milestone rather than refiled.
 
 ## Open-source considerations
 
@@ -322,3 +442,25 @@ and `GITHUB_APP_CLIENT_ID` belong in documented configuration, not in defaults
 that happen to work on one laptop — and the enrolment flow is the first thing a
 contributor will touch, so the device-flow login needs contributor-facing
 documentation in `client/README.md` rather than tribal knowledge.
+
+## References
+
+- `hub/review_bingo_hub/api/routes.py` — router composition; where the unused open routers are included
+- `hub/review_bingo_hub/api/clients.py:36` — `get_current_client`, the existing bearer-token dependency
+- `hub/review_bingo_hub/api/clients.py:52` — open registration endpoint that device-flow enrolment replaces
+- `hub/review_bingo_hub/api/jobs.py:59` — targeted lease endpoint carrying the 403/404 disclosure rule
+- `hub/review_bingo_hub/api/jobs.py:132` — unauthenticated job feed
+- `hub/review_bingo_hub/api/policies.py:18` — world-writable policy upsert
+- `hub/review_bingo_hub/api/webhooks.py:53` — HMAC verification, the one already-correct public surface
+- `hub/review_bingo_hub/api/admin.py:39` — `/_admin` endpoints relying on a Traefik that does not exist here
+- `hub/review_bingo_hub/services/job_service.py:38` — active-job dedup on repo/PR/head_sha
+- `hub/review_bingo_hub/services/job_service.py:95` — `lease_next_job`, gains the access-set filter
+- `hub/review_bingo_hub/services/job_service.py:120` — `lease_specific_job`, gains the same filter
+- `hub/review_bingo_hub/services/relay_service.py:69` — installation-token relay, unchanged by this work
+- `hub/review_bingo_hub/models/review_client.py:76` — `ReviewClient`, gains `identity_id`
+- `hub/review_bingo_hub/core/config.py:93` — `AUTH_PROVIDER_TYPE`, the template's inert IdP stack
+- `hub/review_bingo_hub/core/config.py:202` — GitHub App settings, gains `GITHUB_APP_CLIENT_ID`
+- `hub/review_bingo_hub/main.py:203` — the disabled template AuthMiddleware this design does not revive
+- `hub/review_bingo_hub/tests/conftest.py` — autouse `.env` fixture that must also pin the enrolment mode
+- `dashboard/index.html` — single-file dashboard gaining a login prompt
+- `client/bingo_mcp.py` — MCP client gaining the device-flow login command

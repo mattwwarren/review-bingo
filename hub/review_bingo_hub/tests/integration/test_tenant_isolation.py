@@ -10,10 +10,7 @@ a critical security boundary. These tests ensure:
 5. Query filters are applied to prevent data leaks
 """
 
-from http import HTTPStatus
-
 import pytest
-from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -369,39 +366,3 @@ class TestQueryFilterVerification:
         assert len(docs) == 1
         assert docs[0].id == doc_a.id
         assert all(d.organization_id == org_a.id for d in docs)
-
-
-class TestTenantIsolationMiddlewareIntegration:
-    """Verify TenantIsolationMiddleware integration with endpoints."""
-
-    @pytest.mark.asyncio
-    async def test_protected_endpoint_requires_tenant_context(
-        self,
-        client: AsyncClient,
-        org_a_with_user_a: tuple[Organization, User],
-    ) -> None:
-        """Protected endpoints enforce tenant isolation when accessed.
-
-        When accessing /organizations endpoint with tenant context (injected by TestAuthMiddleware),
-        the endpoint should:
-        1. Return 200 OK (endpoint is accessible with valid tenant context)
-        2. Return paginated result with organization data
-        3. Apply tenant isolation filters automatically
-
-        In production, missing tenant context would result in 401/403.
-        In test environment, TestAuthMiddleware injects tenant context for all requests.
-        """
-        _org_a, _user_a = org_a_with_user_a
-
-        # Access endpoint with tenant context (injected by TestAuthMiddleware)
-        response = await client.get(
-            "/organizations",
-            headers={},  # TestAuthMiddleware provides tenant context automatically
-        )
-
-        # ASSERTION: Endpoint should be accessible with tenant context and return paginated results
-        assert response.status_code == HTTPStatus.OK
-        result = response.json()
-        # Result should be a paginated response with items list
-        assert "items" in result
-        assert isinstance(result["items"], list)

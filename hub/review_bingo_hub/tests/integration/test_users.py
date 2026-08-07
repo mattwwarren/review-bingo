@@ -4,9 +4,15 @@ Tests cover CRUD operations, validation, relationships, and error handling.
 """
 
 from http import HTTPStatus
+from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from review_bingo_hub.models.membership import Membership
+from review_bingo_hub.models.organization import Organization
 
 # Test constants
 NUM_TEST_USERS = 3
@@ -245,12 +251,16 @@ class TestUserOrganizationRelationship:
     """Test user-organization relationship expansion."""
 
     @pytest.mark.asyncio
-    async def test_user_shows_organizations(self, client: AsyncClient) -> None:
+    async def test_user_shows_organizations(self, client: AsyncClient, session: AsyncSession) -> None:
         """User should show organizations after membership is created.
 
         Note: POST /users auto-creates a membership to the default test org,
-        and POST /organizations auto-creates OWNER membership for the current
-        user. So the user will have at least 2 orgs after these operations.
+        so the user already has at least 1 org before the extra membership.
+
+        The extra organization and membership are built directly through the
+        session fixture (the same pattern as test_tenant_isolation.py's
+        org_a_with_user_a) because the /organizations and /memberships routers
+        are no longer wired into the app.
         """
         # Create user (auto-creates membership to default test org)
         user_response = await client.post(
@@ -263,21 +273,15 @@ class TestUserOrganizationRelationship:
         user_id = user_response.json()["id"]
         initial_org_count = len(user_response.json()["organizations"])
 
-        # Create organization
-        org_response = await client.post(
-            "/organizations",
-            json={"name": "Test Org"},
-        )
-        org_id = org_response.json()["id"]
+        # Create organization directly (commit populates the server-generated id)
+        org = Organization(name="Test Org")
+        session.add(org)
+        await session.commit()
+        org_id = str(org.id)
 
-        # Create membership
-        await client.post(
-            "/memberships",
-            json={
-                "user_id": user_id,
-                "organization_id": org_id,
-            },
-        )
+        # Create membership directly
+        session.add(Membership(user_id=UUID(user_id), organization_id=org.id))
+        await session.commit()
 
         # Get user and verify organizations
         get_response = await client.get(f"/users/{user_id}")
@@ -316,8 +320,13 @@ class TestUserOrganizationRelationship:
         assert isinstance(user["organizations"], list)
 
     @pytest.mark.asyncio
-    async def test_delete_user_cascades_memberships(self, client: AsyncClient) -> None:
-        """Deleting a user should cascade delete their memberships."""
+    async def test_delete_user_cascades_memberships(self, client: AsyncClient, session: AsyncSession) -> None:
+        """Deleting a user should cascade delete their memberships.
+
+        The organization and membership are built directly through the session
+        fixture, and the cascade is verified with a direct query, because the
+        /organizations and /memberships routers are no longer wired into the app.
+        """
         # Create user
         user_response = await client.post(
             "/users",
@@ -328,22 +337,16 @@ class TestUserOrganizationRelationship:
         )
         user_id = user_response.json()["id"]
 
-        # Create organization
-        org_response = await client.post(
-            "/organizations",
-            json={"name": "Test Org"},
-        )
-        org_id = org_response.json()["id"]
+        # Create organization directly (commit populates the server-generated id)
+        org = Organization(name="Test Org")
+        session.add(org)
+        await session.commit()
 
-        # Create membership
-        membership_response = await client.post(
-            "/memberships",
-            json={
-                "user_id": user_id,
-                "organization_id": org_id,
-            },
-        )
-        membership_id = membership_response.json()["id"]
+        # Create membership directly
+        membership = Membership(user_id=UUID(user_id), organization_id=org.id)
+        session.add(membership)
+        await session.commit()
+        membership_id = membership.id
 
         # Delete user (pass X-User-ID header matching the user being deleted)
         delete_response = await client.delete(
@@ -353,9 +356,8 @@ class TestUserOrganizationRelationship:
         assert delete_response.status_code == HTTPStatus.NO_CONTENT
 
         # Verify membership is deleted (cascade)
-        membership_get = await client.delete(f"/memberships/{membership_id}")
-        # Should get 404 since cascade delete already removed it
-        assert membership_get.status_code == HTTPStatus.NOT_FOUND
+        result = await session.execute(select(Membership).where(Membership.id == membership_id))
+        assert result.scalar_one_or_none() is None
 
 
 class TestUserErrorHandling:

@@ -10,16 +10,38 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import Select, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.repo_policy import RepoPolicy
 from review_bingo_hub.models.review_client import ModelTier, ReviewClient, tiers_at_or_below
-from review_bingo_hub.models.review_job import JobState, ReviewJob, ReviewJobBase, ReviewJobReport
+from review_bingo_hub.models.review_job import (
+    JobState,
+    ReviewJob,
+    ReviewJobBase,
+    ReviewJobFilters,
+    ReviewJobReport,
+)
+from review_bingo_hub.services.identity_service import accessible_repo_names
 
 ACTIVE_STATES = (JobState.QUEUED, JobState.LEASED)
+
+
+async def _filter_to_access(session: AsyncSession, client: ReviewClient, query: Select) -> Select:
+    """AND the caller's access set onto a ReviewJob query, or leave it untouched.
+
+    The one place `lease_next_job`, `lease_specific_job`, and `list_jobs` apply
+    the access-set filter, so the three call sites can't drift into three
+    slightly different where-clauses. ANDs with any other repo_full_name filter
+    already on `query` — asking for a repo outside the access set is an
+    ordinary empty result, not a special case.
+    """
+    access = await accessible_repo_names(session, client)
+    if access is not None:
+        query = query.where(col(ReviewJob.repo_full_name).in_(access))
+    return query
 
 
 async def enqueue_job(
@@ -95,14 +117,18 @@ async def reclaim_expired_leases(session: AsyncSession) -> int:
 async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJob | None:
     """Hand the oldest eligible queued job to a client.
 
-    Eligibility is the policy floor: the job's min_tier must be at or below
-    the client's declared tier. FOR UPDATE SKIP LOCKED keeps concurrent
-    leases from colliding.
+    Eligibility is two independent gates. The policy floor: the job's min_tier
+    must be at or below the client's declared tier. And access: the job's repo
+    must be one the client's GitHub account can reach. Both are resolved here
+    rather than passed in, so no caller can hand this function a wider scope
+    than the client actually has.
+
+    FOR UPDATE SKIP LOCKED keeps concurrent leases from colliding.
     """
     await reclaim_expired_leases(session)
 
     eligible_tiers = [t.value for t in tiers_at_or_below(client.tier)]
-    result = await session.execute(
+    query = (
         select(ReviewJob)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
         .where(col(ReviewJob.min_tier).in_(eligible_tiers))
@@ -110,6 +136,9 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
         .limit(1)
         .with_for_update(skip_locked=True)
     )
+    query = await _filter_to_access(session, client, query)
+
+    result = await session.execute(query)
     job = result.scalar_one_or_none()
     if job is None:
         return None
@@ -123,13 +152,14 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
     Backs "pick this one" flows (dashboard selection, MCP clients) where the
     caller already knows which job it wants. The eligibility rules are the
     same as `lease_next_job` — naming a job is not a way around a repo's model
-    floor — and the state check lives inside the locking SELECT so two callers
-    racing for the same job resolve to exactly one winner.
+    floor, nor around its access set — and the state check lives inside the
+    locking SELECT so two callers racing for the same job resolve to exactly
+    one winner.
     """
     await reclaim_expired_leases(session)
 
     eligible_tiers = [t.value for t in tiers_at_or_below(client.tier)]
-    result = await session.execute(
+    query = (
         select(ReviewJob)
         .where(col(ReviewJob.id) == job_id)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
@@ -137,6 +167,9 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
         .limit(1)
         .with_for_update(skip_locked=True)
     )
+    query = await _filter_to_access(session, client, query)
+
+    result = await session.execute(query)
     job = result.scalar_one_or_none()
     if job is None:
         return None
@@ -177,22 +210,49 @@ async def report_job(
 
 
 async def get_job(session: AsyncSession, job_id: UUID) -> ReviewJob | None:
+    """Fetch a job by id with no authorization applied at all.
+
+    Only for callers whose authorization is something other than repo access —
+    `report_job_endpoint` gates on holding the lease. Anything answering a
+    *read* wants `get_job_for_client`.
+    """
     result = await session.execute(select(ReviewJob).where(col(ReviewJob.id) == job_id))
     return result.scalar_one_or_none()
 
 
+async def get_job_for_client(session: AsyncSession, client: ReviewClient, job_id: UUID) -> ReviewJob | None:
+    """Fetch a job this client is allowed to see, or None.
+
+    The 404 boundary: callers must **not** distinguish its two None cases.
+    "No such job" and "a real job in a repo you cannot reach" have to answer
+    identically, or the endpoint becomes an oracle that confirms which job ids
+    exist — and with them, the repo layout of every other org on the hub.
+    """
+    job = await get_job(session, job_id)
+    if job is None:
+        return None
+    access = await accessible_repo_names(session, client)
+    if access is not None and job.repo_full_name not in access:
+        return None
+    return job
+
+
 async def list_jobs(
     session: AsyncSession,
-    *,
-    state: JobState | None = None,
-    repo_full_name: str | None = None,
-    offset: int = 0,
-    limit: int = 100,
+    client: ReviewClient,
+    filters: ReviewJobFilters | None = None,
 ) -> list[ReviewJob]:
-    query = select(ReviewJob).order_by(col(ReviewJob.created_at).desc()).offset(offset).limit(limit)
-    if state is not None:
-        query = query.where(col(ReviewJob.state) == state.value)
-    if repo_full_name is not None:
-        query = query.where(col(ReviewJob.repo_full_name) == repo_full_name)
+    """The job feed, scoped to what this client may see.
+
+    `client` is required rather than optional: an access filter you can forget
+    to pass is one an endpoint will eventually forget to pass.
+    """
+    filters = filters or ReviewJobFilters()
+    query = select(ReviewJob).order_by(col(ReviewJob.created_at).desc()).offset(filters.offset).limit(filters.limit)
+    if filters.state is not None:
+        query = query.where(col(ReviewJob.state) == filters.state.value)
+    if filters.repo_full_name is not None:
+        query = query.where(col(ReviewJob.repo_full_name) == filters.repo_full_name)
+    query = await _filter_to_access(session, client, query)
     result = await session.execute(query)
     return list(result.scalars().all())

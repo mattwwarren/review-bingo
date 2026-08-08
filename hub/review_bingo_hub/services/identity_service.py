@@ -30,6 +30,7 @@ from sqlmodel import col
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.core.logging import get_logging_context
 from review_bingo_hub.models.github_identity import GithubIdentity, IdentityRepoAccess
+from review_bingo_hub.models.review_client import ReviewClient
 from review_bingo_hub.services.github_identity_service import (
     GithubIdentityError,
     GithubIdentityService,
@@ -105,6 +106,32 @@ async def get_or_create_identity(
         )
     await session.flush()  # type: ignore[attr-defined]
     return identity
+
+
+async def accessible_repo_names(session: AsyncSession, client: ReviewClient) -> frozenset[str] | None:
+    """The repos this client's GitHub account may see, or None when scoping is inert.
+
+    The single place "what can this caller reach" is decided, so dispatch,
+    reads, and the roster cannot drift into three different answers.
+
+    Returns None to mean *unrestricted, filter by tier only* — the dev-mode
+    carve-out. Under CLIENT_ENROLMENT_MODE=dev there is no GitHub account
+    behind a client at all, so there is nothing to derive a scope from and
+    pretending otherwise would just be a scope we invented.
+
+    Under github mode a client with no identity_id — a stale row from before
+    GitHub-derived admission landed — gets an empty frozenset, not None: no
+    account means nothing to match against, so nothing leases and nothing
+    reads. Fails closed, and the distinction from None is load-bearing.
+    """
+    if settings.client_enrolment_mode != "github":
+        return None
+    if client.identity_id is None:
+        return frozenset()
+    result = await session.execute(
+        select(IdentityRepoAccess.repo_full_name).where(col(IdentityRepoAccess.identity_id) == client.identity_id)
+    )
+    return frozenset(result.scalars().all())
 
 
 def _denied(

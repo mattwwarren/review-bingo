@@ -7,10 +7,10 @@ likes, and reports back; the hub relays the result to the PR.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse
 
 from review_bingo_hub.api.clients import ClientDep
@@ -18,6 +18,7 @@ from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.review_client import ClientStatus, tiers_at_or_below
 from review_bingo_hub.models.review_job import (
     JobState,
+    ReviewJobFilters,
     ReviewJobLease,
     ReviewJobRead,
     ReviewJobReport,
@@ -25,6 +26,7 @@ from review_bingo_hub.models.review_job import (
 from review_bingo_hub.services.client_service import touch_client
 from review_bingo_hub.services.job_service import (
     get_job,
+    get_job_for_client,
     lease_next_job,
     lease_specific_job,
     list_jobs,
@@ -67,7 +69,11 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
     if client.status != ClientStatus.CHECKED_IN:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Check in before leasing")
 
-    job = await get_job(session, job_id)
+    # A job outside this client's access set answers 404, exactly as a job that
+    # never existed does — the access check must not confirm the id is real.
+    # The tier check stays *after* it: a floor you could clear with a better
+    # model is worth explaining, unlike a repo you cannot see.
+    job = await get_job_for_client(session, client, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     # min_tier/tier are ModelTier at the type level but plain strings at runtime —
@@ -104,6 +110,11 @@ async def report_job_endpoint(
 
     The report is committed first, then relayed best-effort — a GitHub
     hiccup never loses a client's finished work.
+
+    Deliberately the unscoped `get_job`: authorization here is holding the
+    lease, checked below. A client that legitimately leased a job must still be
+    able to report on it even if its access snapshot has since narrowed —
+    refusing the report would lose finished work, not protect anything.
     """
     job = await get_job(session, job_id)
     if job is None:
@@ -132,28 +143,26 @@ async def report_job_endpoint(
 @router.get("", response_model=list[ReviewJobRead])
 async def list_jobs_endpoint(
     session: SessionDep,
-    state: JobState | None = None,
-    repo_full_name: str | None = None,
-    offset: int = 0,
-    limit: int = 100,
+    client: ClientDep,
+    filters: Annotated[ReviewJobFilters, Depends()],
 ) -> list[ReviewJobRead]:
-    """Job feed for the dashboard, newest first."""
-    jobs = await list_jobs(session, state=state, repo_full_name=repo_full_name, offset=offset, limit=limit)
+    """Job feed for the dashboard, newest first — only repos this client can reach."""
+    jobs = await list_jobs(session, client, filters)
     return [ReviewJobRead.model_validate(j) for j in jobs]
 
 
 @router.get("/{job_id}", response_model=ReviewJobRead)
-async def get_job_endpoint(job_id: UUID, session: SessionDep) -> ReviewJobRead:
-    job = await get_job(session, job_id)
+async def get_job_endpoint(job_id: UUID, session: SessionDep, client: ClientDep) -> ReviewJobRead:
+    job = await get_job_for_client(session, client, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return ReviewJobRead.model_validate(job)
 
 
 @router.get("/{job_id}/comment", response_class=PlainTextResponse)
-async def job_comment_endpoint(job_id: UUID, session: SessionDep) -> str:
+async def job_comment_endpoint(job_id: UUID, session: SessionDep, client: ClientDep) -> str:
     """The PR comment for a reported job — what the relay posts (or posted)."""
-    job = await get_job(session, job_id)
+    job = await get_job_for_client(session, client, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     if job.verdict is None:
@@ -162,9 +171,9 @@ async def job_comment_endpoint(job_id: UUID, session: SessionDep) -> str:
 
 
 @router.get("/{job_id}/relay-target")
-async def relay_target_endpoint(job_id: UUID, session: SessionDep) -> dict[str, Any]:
+async def relay_target_endpoint(job_id: UUID, session: SessionDep, client: ClientDep) -> dict[str, Any]:
     """Where this job's result goes (or went): github vs log mode."""
-    job = await get_job(session, job_id)
+    job = await get_job_for_client(session, client, job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return relay_target(job)

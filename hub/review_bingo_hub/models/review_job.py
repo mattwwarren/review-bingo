@@ -15,6 +15,7 @@ handed out; dispatch stops offering a job after `max_attempts`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -108,6 +109,22 @@ class ReviewJobRead(ReviewJobBase):
     updated_at: datetime
 
     model_config: ClassVar[ConfigDict] = ConfigDict(from_attributes=True)  # type: ignore[assignment]
+
+
+@dataclass
+class ReviewJobFilters:
+    """Optional narrowing of the job feed — one object, not four parameters.
+
+    Grouped because they travel together everywhere: `GET /jobs` takes them as
+    query parameters (FastAPI reads this dataclass's fields directly) and hands
+    the same object to `list_jobs`. Access scoping is deliberately *not* a field
+    here — it is derived from the caller, never supplied by one.
+    """
+
+    state: JobState | None = None
+    repo_full_name: str | None = None
+    offset: int = 0
+    limit: int = 100
 
 
 class ReviewJobLease(SQLModel):

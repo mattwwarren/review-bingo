@@ -14,9 +14,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import bingo_mcp
 import httpx
 import pytest
+
+import bingo_mcp
 
 
 def api_with(handler: Any) -> httpx.Client:

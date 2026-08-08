@@ -1,0 +1,62 @@
+[project]
+name = "review-bingo-client"
+version = "0.1.0"
+description = "The thin CLI a grid member runs: lease a job, review on your own compute, report back"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27",
+  "mcp>=2.0",
+]
+
+[tool.uv]
+# client/ is two standalone PEP 723 scripts, not a wheel-buildable package.
+# `uv sync` here exists only to materialise the lint/type-check/test toolchain.
+package = false
+
+[tool.ruff]
+line-length = 119
+show-fixes = true
+
+[tool.ruff.lint]
+# Same rule set as hub/pyproject.toml so both halves of the repo are held to
+# one standard. See hub/pyproject.toml for the per-code rationale.
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "PL", "RUF", "ANN", "S", "W", "EM", "TRY", "A", "ARG", "C90", "PT", "RSE", "RET"]
+# EM102/TRY003 push exception text into named constants or custom exception
+# classes. That is the right trade for hub's layered service code; for a
+# single-file CLI whose errors are read by a human at a terminal, an f-string
+# in the raise is the clearest thing on the page.
+ignore = ["EM102", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+# S101: bare `assert` is the point of a pytest suite. Ignored by code rather
+# than ignoring the whole "S" family, which would make the deliberate
+# `# noqa: S105` comments on the fake-token fixtures report as unused (RUF100).
+# PT009/PLR2004: raw asserts and magic numbers are idiomatic in test bodies.
+# ARG001/ARG002/ARG005/ANN401: stub callbacks and monkeypatch doubles take
+# arguments they never read and accept **kwargs: Any by design.
+# TRY002: raising bare Exception is fine when the test only needs *something*
+# to blow up.
+"test_*.py" = ["S101", "PT009", "PLR2004", "ARG001", "ARG002", "ARG005", "ANN401", "TRY002"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+# 3.11 is client's own floor (the PEP 723 headers), not hub's 3.13 — the
+# scripts are meant to run on whatever the grid member already has.
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.10.0",
+  "pytest>=8.0.0",
+  "ruff>=0.5.0",
+]

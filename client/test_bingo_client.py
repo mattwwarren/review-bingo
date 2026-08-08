@@ -15,9 +15,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import bingo_client
 import httpx
 import pytest
+
+import bingo_client
 
 
 def http_with(handler: Any) -> httpx.Client:

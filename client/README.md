@@ -109,3 +109,19 @@ offline (that's what `scripts/demo.sh` does).
 
 Registration state (hub URL + bearer token) lands in
 `~/.config/review-bingo/client.json` (`--state` to override).
+
+## Development
+
+Running the scripts needs no install — that's the point of the PEP 723
+headers, and `uv run client/bingo_client.py ...` keeps working exactly as
+above. `client/pyproject.toml` exists only to pin the toolchain that CI
+enforces. To reproduce the CI gates locally:
+
+```bash
+cd client
+uv sync
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy .
+uv run pytest
+```

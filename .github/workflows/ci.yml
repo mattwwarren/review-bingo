@@ -1,9 +1,15 @@
 # Root CI for the review-bingo monorepo.
 #
 # The Copier-rendered workflows under hub/.github/ are inert (GitHub only
-# reads /.github at the repo root); this workflow runs the same gates with
-# working-directory pinned to hub/. Tests use pytest-docker, which starts
-# Postgres from hub/tests/docker-compose.yml.
+# reads /.github at the repo root); this workflow runs the same gates here.
+#
+# Each subdir owns its own toolchain, so each gets its own pair of jobs. The
+# workflow-level default below pins working-directory to hub/ — the *-client
+# jobs override it with a job-level `defaults` block, which replaces (does not
+# merge with) the workflow-level default for that job.
+#
+# Hub tests use pytest-docker, which starts Postgres from
+# hub/tests/docker-compose.yml. Client tests need no services.
 
 name: CI
 
@@ -71,3 +77,68 @@ jobs:
 
       - name: Run tests
         run: uv run pytest review_bingo_hub/tests/ -v
+
+  lint-client:
+    name: Lint & type-check (client)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy .
+
+  tests-client:
+    name: Tests (client)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install
+
+      # Namespaced separately from the hub cache: client's dependency set is a
+      # small subset, so restoring hub's much larger cache here would cost more
+      # than it saves.
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-client-${{ runner.os }}-${{ hashFiles('client/uv.lock') }}
+          restore-keys: |
+            uv-client-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run pytest -v

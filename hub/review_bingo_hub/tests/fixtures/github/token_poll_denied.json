@@ -1,0 +1,5 @@
+{
+  "error": "access_denied",
+  "error_description": "The authorization request was denied.",
+  "error_uri": "https://docs.github.com/developers/apps/authorizing-oauth-apps#error-codes-for-the-device-flow"
+}

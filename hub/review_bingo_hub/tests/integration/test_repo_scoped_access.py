@@ -20,9 +20,7 @@ inferred:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -35,7 +33,6 @@ from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.github_identity import IdentityRepoAccess
 from review_bingo_hub.models.review_client import ReviewClient, ReviewClientCreate
 from review_bingo_hub.services.client_service import register_client
-from review_bingo_hub.services.github_identity_service import GithubRepoAccess
 from review_bingo_hub.services.identity_service import (
     accessible_repo_names,
     get_or_create_identity,
@@ -43,96 +40,17 @@ from review_bingo_hub.services.identity_service import (
 )
 from review_bingo_hub.services.job_service import lease_next_job
 from review_bingo_hub.tests.integration.conftest import (
-    GITHUB_TOKEN,
+    ALLOWED,
+    FORBIDDEN,
+    UNRELATED,
+    Enrolee,
     FakeGithubIdentityService,
     backdate_access_refreshed_at,
+    enqueue,
+    enrol_github_client,
     enrolment_headers,
-    marge,
     readable,
-    use_github_mode,
 )
-
-PR_WEBHOOK_HEADERS = {"X-GitHub-Event": "pull_request"}
-
-# One repo the caller can reach and one it cannot: every access assertion below
-# is "in ALLOWED, not in FORBIDDEN", so naming them once keeps the tests about
-# the boundary rather than about string literals.
-ALLOWED = "acme/payments"
-FORBIDDEN = "acme/other-repo"
-UNRELATED = "acme/unrelated"
-
-
-def pr_payload(repo: str, sha: str, number: int = 7) -> dict[str, Any]:
-    return {
-        "action": "opened",
-        "repository": {"full_name": repo},
-        "pull_request": {"number": number, "head": {"sha": sha}, "title": "Fix rounding"},
-    }
-
-
-async def enqueue(client: AsyncClient, repo: str, sha: str, number: int = 7) -> str:
-    """Call a review round from a PR webhook, returning the queued job's id."""
-    response = await client.post("/webhooks/github", json=pr_payload(repo, sha, number), headers=PR_WEBHOOK_HEADERS)
-    assert response.status_code == HTTPStatus.OK
-    assert response.json()["status"] == "queued"
-    job_id: str = response.json()["job_id"]
-    return job_id
-
-
-@dataclass(frozen=True)
-class Enrolee:
-    """One GitHub account to enrol a client under, plus what GitHub says it can reach.
-
-    Bundled into one object rather than spread across parameters of
-    `enrol_github_client` so that helper stays inside the repo's argument-count
-    limit; the fields are exactly the knobs the tests below need to turn.
-    """
-
-    login: str
-    user_id: int
-    repo_access: list[GithubRepoAccess] = field(default_factory=list)
-    tier: str = "standard"
-    name: str | None = None
-
-
-async def enrol_github_client(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-    fake: FakeGithubIdentityService,
-    enrolee: Enrolee,
-) -> tuple[str, dict[str, str]]:
-    """Register + check in one github-mode client under a specific identity + access set.
-
-    Calls `use_github_mode` (idempotent if a test already called it) then points
-    `fake` at this identity/access set immediately before the POST it makes.
-    Safe to call repeatedly with distinct enrolees in the same test: registration
-    is awaited one request at a time, and once a call returns, that client's row
-    and bearer token are independent durable facts — the fake only has to
-    represent one identity at the instant of registration, not all of them at
-    once. Returns (client_id, bearer headers).
-    """
-    use_github_mode(monkeypatch, fake)
-    fake.identity = marge(login=enrolee.login, user_id=enrolee.user_id)
-    fake.repo_access = list(enrolee.repo_access)
-
-    response = await client.post(
-        "/clients",
-        json={
-            "name": enrolee.name or enrolee.login,
-            "model_name": "test-model",
-            "provider": "test",
-            "tier": enrolee.tier,
-        },
-        headers=enrolment_headers(GITHUB_TOKEN),
-    )
-    assert response.status_code == HTTPStatus.CREATED
-    body = response.json()
-    headers = enrolment_headers(body["token"])
-
-    check_in = await client.post("/clients/check-in", headers=headers)
-    assert check_in.status_code == HTTPStatus.OK
-    client_id: str = body["client"]["id"]
-    return client_id, headers
 
 
 async def enrol_dev_client(client: AsyncClient, name: str) -> tuple[str, dict[str, str]]:
@@ -172,7 +90,7 @@ async def test_accessible_repo_names_none_in_dev_mode(session: AsyncSession) -> 
 
     grid_client = await make_client_row(session, "dev-box")
 
-    assert await accessible_repo_names(session, grid_client) is None
+    assert await accessible_repo_names(session, grid_client.identity_id) is None
 
 
 async def test_accessible_repo_names_empty_for_github_mode_client_without_identity(
@@ -190,7 +108,7 @@ async def test_accessible_repo_names_empty_for_github_mode_client_without_identi
     grid_client = await make_client_row(session, "stale-pre-a1-row")
     assert grid_client.identity_id is None
 
-    assert await accessible_repo_names(session, grid_client) == frozenset()
+    assert await accessible_repo_names(session, grid_client.identity_id) == frozenset()
 
 
 async def test_accessible_repo_names_reflects_identity_repo_access_rows(
@@ -207,7 +125,7 @@ async def test_accessible_repo_names_reflects_identity_repo_access_rows(
     )
     grid_client = await make_client_row(session, "marge-mac-mini", identity_id=identity.id)
 
-    assert await accessible_repo_names(session, grid_client) == frozenset({ALLOWED, "acme/docs"})
+    assert await accessible_repo_names(session, grid_client.identity_id) == frozenset({ALLOWED, "acme/docs"})
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +289,7 @@ async def test_report_succeeds_after_access_narrows_post_lease(
         delete(IdentityRepoAccess).where(col(IdentityRepoAccess.identity_id) == grid_client.identity_id)
     )
     await session.commit()
-    assert await accessible_repo_names(session, grid_client) == frozenset()
+    assert await accessible_repo_names(session, grid_client.identity_id) == frozenset()
 
     report = {"verdict": "approve", "summary": "Nothing found.", "findings": []}
     response = await client.post(f"/jobs/{job_id}/report", json=report, headers=headers)

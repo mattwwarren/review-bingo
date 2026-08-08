@@ -120,7 +120,7 @@ async def check_in_endpoint(
     """
     if payload is not None and payload.github_token:
         try:
-            await reattest_identity(session, client, payload.github_token, github)
+            await reattest_identity(session, client, github_token=payload.github_token, github=github)
         except EnrolmentUnavailableError:
             # Lenient on purpose, unlike enrolment's 503. Refusing a first
             # enrolment over a GitHub outage costs the caller nothing it had;

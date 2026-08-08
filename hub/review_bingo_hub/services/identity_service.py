@@ -446,6 +446,7 @@ async def reattest_identity(
         "identity_reattested",
         extra={
             **get_logging_context(),
+            "client_id": str(client.id),
             "github_login": identity.github_login,
             "github_user_id": identity.github_user_id,
             "accessible_repo_count": len(repo_access),

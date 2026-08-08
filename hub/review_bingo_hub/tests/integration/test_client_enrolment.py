@@ -595,6 +595,7 @@ async def test_check_in_reattestation_logs_identity_reattested(
     reattested = records_named(caplog, "identity_reattested")
     assert len(reattested) == 1
     assert reattested[0].levelno == logging.INFO
+    assert reattested[0].client_id == response.json()["id"]  # type: ignore[attr-defined]
     assert reattested[0].github_login == "marge-bouvier"  # type: ignore[attr-defined]
     assert reattested[0].github_user_id == 20482231  # type: ignore[attr-defined]
     assert reattested[0].accessible_repo_count == 2  # type: ignore[attr-defined]

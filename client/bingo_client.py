@@ -362,12 +362,16 @@ def build_parser() -> argparse.ArgumentParser:
     enrolment.add_argument("--tier", default="standard", choices=["experimental", "standard", "frontier"])
     enrolment.add_argument("--quant", default=None)
 
+    # Shared by `login` and `check-in --reattest`, the two commands that run
+    # the GitHub device flow.
+    device_flow = argparse.ArgumentParser(add_help=False)
+    device_flow.add_argument("--client-id", default=None, help="GitHub App client id (or set GITHUB_APP_CLIENT_ID)")
+
     login = sub.add_parser(
         "login",
-        parents=[common, enrolment],
+        parents=[common, enrolment, device_flow],
         help="Authorize with GitHub (device flow) and join the grid",
     )
-    login.add_argument("--client-id", default=None, help="GitHub App client id (or set GITHUB_APP_CLIENT_ID)")
     login.set_defaults(func=cmd_login)
 
     register = sub.add_parser(
@@ -386,13 +390,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Out of the generic loop below because it carries the device-flow flags:
     # re-attestation is the same GitHub round trip `login` makes, spent again.
-    check_in = sub.add_parser("check-in", parents=[common], help="Declare availability")
+    check_in = sub.add_parser("check-in", parents=[common, device_flow], help="Declare availability")
     check_in.add_argument(
         "--reattest",
         action="store_true",
         help="Also re-run the GitHub device flow and refresh the hub's view of your repo access",
     )
-    check_in.add_argument("--client-id", default=None, help="GitHub App client id (or set GITHUB_APP_CLIENT_ID)")
     check_in.set_defaults(func=cmd_check_in)
 
     for name, func, help_text in [

@@ -35,11 +35,13 @@ from review_bingo_hub.services.github_identity_service import GithubRepoAccess, 
 from review_bingo_hub.services.identity_service import CALLER_IDENTITY_UNAVAILABLE_DEV_MODE
 from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
+    Enrolee,
     FakeGithubIdentityService,
     dump,
     enrolment_headers,
     marge,
     records_named,
+    start_dashboard_session,
     use_github_mode,
 )
 
@@ -260,6 +262,33 @@ async def test_policy_write_rejected_for_dev_enrolled_client_in_github_mode(
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 
     assert response.status_code == HTTPStatus.FORBIDDEN
+
+
+async def test_policy_write_rejected_for_dashboard_session(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard session is a valid credential of the wrong kind, not an invalid one.
+
+    B1 (#24) keyed read scoping on the identity a dashboard session already
+    carries, which makes "just let a session write policy too" the
+    natural-looking next change from here. Today it is wrong, and 401 (not
+    403) is the pin that keeps it wrong on purpose: 403 would mean
+    `ScopedCallerDep` had been wired into `RepoAdminDep`, and the session
+    merely lacked admin rather than never being a credential this path
+    recognizes at all.
+    """
+    fake = FakeGithubIdentityService()
+    enrolee = Enrolee(
+        login="marge-bouvier",
+        user_id=20482231,
+        repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN)],
+    )
+    headers = await start_dashboard_session(client, monkeypatch, fake, enrolee)
+
+    response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=headers)
+
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
 # ---------------------------------------------------------------------------

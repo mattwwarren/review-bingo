@@ -261,7 +261,7 @@ async def test_device_poll_terminal_refusal_is_400_and_audited(
     denied = records_named(caplog, "enrolment_denied")
     assert len(denied) == 1
     assert denied[0].levelno == logging.WARNING
-    assert denied[0].reason == reason  # type: ignore[attr-defined]
+    assert denied[0].__dict__["reason"] == reason
     assert await row_counts(session) == (0, 0)
 
 
@@ -382,8 +382,8 @@ async def test_device_poll_success_logs_dashboard_session_created(
     created = records_named(caplog, "dashboard_session_created")
     assert len(created) == 1
     assert created[0].levelno == logging.INFO
-    assert created[0].identity_id == str(identity.id)  # type: ignore[attr-defined]
-    assert created[0].github_login == "marge-bouvier"  # type: ignore[attr-defined]
+    assert created[0].__dict__["identity_id"] == str(identity.id)
+    assert created[0].__dict__["github_login"] == "marge-bouvier"
 
 
 async def test_device_poll_logs_neither_the_github_token_nor_the_session_token(

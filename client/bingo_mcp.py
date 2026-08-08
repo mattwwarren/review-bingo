@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from bingo_client import DEFAULT_STATE_PATH, api, load_state
 from mcp.server.mcpserver import MCPServer
+
+from bingo_client import DEFAULT_STATE_PATH, api, load_state
 
 
 class HubRefusedError(RuntimeError):

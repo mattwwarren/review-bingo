@@ -248,6 +248,18 @@ class Settings(BaseSettings):
             "the snapshot and the credential that could refresh it expire together"
         ),
     )
+    dashboard_session_ttl_seconds: int = Field(
+        default=12 * 60 * 60,
+        ge=60,
+        alias="DASHBOARD_SESSION_TTL_SECONDS",
+        description=(
+            "How long a dashboard login lasts before the person signs in again. Its own knob rather "
+            "than a reuse of IDENTITY_ACCESS_TTL_SECONDS: that one bounds how stale a cached "
+            "authorization may be before the hub dispatches work against it, this one bounds a "
+            "person's sign-in, and tying them would mean tightening dispatch safety by logging "
+            "everybody out. Defaults to 12h — one working day"
+        ),
+    )
 
     @staticmethod
     def _validate_choice(value: str, allowed: list[str], field_name: str) -> str:

@@ -99,6 +99,12 @@ class PolicyWriteForbiddenError(PolicyAuthorizationError):
 REASON_UNKNOWN_CALLER = "unknown_token"
 REASON_NOT_ADMIN = "not_admin"
 
+# The dev-mode bypass has no ReviewClient to name — no client is registered at
+# all for a raw shared-secret write. This sentinel makes that absence explicit
+# in the log record rather than leaving the caller-identity fields silently
+# missing, which would read as an omission bug rather than a deliberate one.
+CALLER_IDENTITY_UNAVAILABLE_DEV_MODE = "unavailable_dev_mode_shared_secret"
+
 # api/clients.py's get_current_client imports this rather than repeating the
 # literal, so the two entry points cannot be told apart by their refusal text.
 DETAIL_UNKNOWN_CALLER = "Unknown client token"
@@ -237,15 +243,17 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
         _resolve_dev_credential(credential)
         LOGGER.warning(
             "policy_write_dev_mode_bypass",
-            extra={**get_logging_context(), "repo_full_name": repo_full_name},
+            extra={
+                **get_logging_context(),
+                "repo_full_name": repo_full_name,
+                "caller_identity": CALLER_IDENTITY_UNAVAILABLE_DEV_MODE,
+            },
         )
         return
 
     client = await _resolve_caller_client(session, credential)
     permission = (
-        await _repo_permission(session, client.identity_id, repo_full_name)
-        if client.identity_id is not None
-        else None
+        await _repo_permission(session, client.identity_id, repo_full_name) if client.identity_id is not None else None
     )
     log_extra = {
         **get_logging_context(),

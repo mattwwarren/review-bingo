@@ -32,6 +32,7 @@ from httpx import AsyncClient
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.github_identity import PermissionLevel
 from review_bingo_hub.services.github_identity_service import GithubRepoAccess, collapse_permissions
+from review_bingo_hub.services.identity_service import CALLER_IDENTITY_UNAVAILABLE_DEV_MODE
 from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
     FakeGithubIdentityService,
@@ -382,6 +383,7 @@ async def test_dev_mode_policy_write_logs_the_bypass(
     assert len(bypass) == 1
     assert bypass[0].levelno == logging.WARNING
     assert bypass[0].__dict__["repo_full_name"] == ADMIN_REPO
+    assert bypass[0].__dict__["caller_identity"] == CALLER_IDENTITY_UNAVAILABLE_DEV_MODE
     assert all(DEV_SECRET not in dump(r) for r in caplog.records)
 
 

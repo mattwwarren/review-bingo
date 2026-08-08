@@ -27,7 +27,7 @@ access from it once, and discards it.
 Usage:
     bingo_client.py login     --hub URL --name NAME --model MODEL --provider P [--client-id ID]
     bingo_client.py register  --hub URL --name NAME --model MODEL --provider P --enrolment-token TOKEN
-    bingo_client.py check-in  [--state PATH]
+    bingo_client.py check-in  [--state PATH] [--reattest [--client-id ID]]
     bingo_client.py run-once  [--state PATH]      # lease → review → report (one round)
     bingo_client.py loop      [--state PATH] [--idle-seconds N]
     bingo_client.py check-out [--state PATH]
@@ -35,6 +35,12 @@ Usage:
 `login` is the normal path. `register` is the same call with the credential
 supplied directly — for a hub running CLIENT_ENROLMENT_MODE=dev, or for a
 GitHub token you already hold.
+
+The hub only serves work against repo access it read recently, and refuses to
+lease once its snapshot ages out (`409`, "check in again"). `check-in
+--reattest` re-runs the device flow and hands the hub a fresh token to refresh
+it. Opt-in on purpose: `loop` runs unattended, and a device flow it triggered by
+itself would sit waiting for a code nobody is there to type.
 
 State (hub URL + bearer token) lives in --state (default
 ~/.config/review-bingo/client.json), written once by `login`/`register`.
@@ -245,15 +251,24 @@ def cmd_register(args: argparse.Namespace) -> None:
     print(f"Registered {args.name} ({body['client']['id']}); token stored in {args.state}")
 
 
-def cmd_login(args: argparse.Namespace) -> None:
+def github_token_via_device_flow(args: argparse.Namespace) -> str:
+    """Run the device flow for `--client-id`/GITHUB_APP_CLIENT_ID, or exit explaining how.
+
+    Shared by `login` and `check-in --reattest`, which need the identical three
+    steps: find the App's client id, run the flow, turn a DeviceFlowError into a
+    message rather than a traceback.
+    """
     client_id = args.client_id or os.environ.get("GITHUB_APP_CLIENT_ID")
     if not client_id:
         sys.exit("No GitHub App client id — pass --client-id or set GITHUB_APP_CLIENT_ID.")
-
     try:
-        token = device_flow_login(client_id)
+        return device_flow_login(client_id)
     except DeviceFlowError as exc:
         sys.exit(str(exc))
+
+
+def cmd_login(args: argparse.Namespace) -> None:
+    token = github_token_via_device_flow(args)
 
     # The token goes to the hub once and is never written to disk: the hub
     # reads identity from it and drops it, and so do we.
@@ -262,11 +277,29 @@ def cmd_login(args: argparse.Namespace) -> None:
     print(f"Enrolled {args.name} ({body['client']['id']}); token stored in {args.state}")
 
 
+def check_in_payload(github_token: str | None) -> dict[str, Any] | None:
+    """The check-in body: a re-attestation, or nothing at all.
+
+    None rather than `{}` without a token: httpx sends `json=None` as an empty
+    body with no Content-Type, which is byte-for-byte the request the hub has
+    always accepted as a plain heartbeat.
+    """
+    if not github_token:
+        return None
+    return {"github_token": github_token}
+
+
 def cmd_check_in(args: argparse.Namespace) -> None:
+    # Same one-shot handling as enrolment: the hub reads repo access from this
+    # token and drops it, and it never touches the state file here either.
+    github_token = github_token_via_device_flow(args) if args.reattest else None
     with api(load_state(args.state)) as client:
-        response = client.post("/clients/check-in")
+        response = client.post("/clients/check-in", json=check_in_payload(github_token))
         response.raise_for_status()
-    print("Checked in — plugged into the grid.")
+    if github_token:
+        print("Checked in — plugged into the grid, repo access re-attested.")
+    else:
+        print("Checked in — plugged into the grid.")
 
 
 def cmd_check_out(args: argparse.Namespace) -> None:
@@ -351,8 +384,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     register.set_defaults(func=cmd_register)
 
+    # Out of the generic loop below because it carries the device-flow flags:
+    # re-attestation is the same GitHub round trip `login` makes, spent again.
+    check_in = sub.add_parser("check-in", parents=[common], help="Declare availability")
+    check_in.add_argument(
+        "--reattest",
+        action="store_true",
+        help="Also re-run the GitHub device flow and refresh the hub's view of your repo access",
+    )
+    check_in.add_argument("--client-id", default=None, help="GitHub App client id (or set GITHUB_APP_CLIENT_ID)")
+    check_in.set_defaults(func=cmd_check_in)
+
     for name, func, help_text in [
-        ("check-in", cmd_check_in, "Declare availability"),
         ("check-out", cmd_check_out, "Leave the grid"),
         ("run-once", cmd_run_once, "Lease and complete a single round"),
         ("loop", cmd_loop, "Keep serving rounds until interrupted"),

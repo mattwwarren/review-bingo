@@ -682,6 +682,31 @@ async def test_identity_access_is_stale_false_without_identity_id(
     assert await identity_access_is_stale(session, grid_client) is False
 
 
+async def test_identity_access_is_stale_true_when_the_identity_row_is_missing(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An identity_id pointing at nothing reads as stale, not as fresh.
+
+    The FK makes this unreachable through the database, so it is constructed
+    in-memory: what is being pinned is the *direction* the code guesses in when
+    an authorization snapshot cannot be found at all. "Not found" resolving to
+    "not expired" is the class of bug that only shows up as a permission nobody
+    can explain.
+    """
+    monkeypatch.setattr(settings, "client_enrolment_mode", "github")
+
+    orphaned = ReviewClient(
+        name="orphaned",
+        model_name="test-model",
+        provider="test",
+        token_hash="not-a-real-token-hash",
+        identity_id=uuid4(),
+    )
+
+    assert await identity_access_is_stale(session, orphaned) is True
+
+
 async def test_lease_next_job_refused_when_access_stale(
     client: AsyncClient,
     session: AsyncSession,

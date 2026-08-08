@@ -14,7 +14,6 @@ not merely as a status code.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
 
@@ -35,11 +34,16 @@ from review_bingo_hub.services.github_identity_service import (
     GithubIdentityError,
     GithubRepoAccess,
     GithubUnavailableError,
-    GithubUserIdentity,
     get_github_identity_service,
 )
+from review_bingo_hub.tests.integration.conftest import (
+    GITHUB_TOKEN,
+    FakeGithubIdentityService,
+    enrolment_headers,
+    marge,
+    use_github_mode,
+)
 
-GITHUB_TOKEN = "gho_16C7e42F292c6912E7710c838347Ae178B4a"
 DEV_SECRET = "test-fixture-placeholder"
 
 REGISTRATION_PAYLOAD = {
@@ -48,50 +52,6 @@ REGISTRATION_PAYLOAD = {
     "provider": "ollama",
     "tier": "standard",
 }
-
-
-@dataclass
-class FakeGithubIdentityService:
-    """Stands in for GitHub. Raises if called when it should not be."""
-
-    identity: GithubUserIdentity | None = None
-    repo_access: list[GithubRepoAccess] | None = None
-    error: Exception | None = None
-    forbidden: bool = False
-    calls: int = 0
-
-    async def get_identity(self, token: str) -> GithubUserIdentity:
-        self._record(token)
-        if self.error is not None:
-            raise self.error
-        assert self.identity is not None
-        return self.identity
-
-    async def get_repo_access(self, token: str) -> list[GithubRepoAccess]:
-        self._record(token)
-        if self.error is not None:
-            raise self.error
-        return list(self.repo_access or [])
-
-    def _record(self, token: str) -> None:
-        if self.forbidden:
-            error_msg = "github_identity_service must not be consulted in dev mode"
-            raise AssertionError(error_msg)
-        assert token == GITHUB_TOKEN
-        self.calls += 1
-
-
-def use_github_mode(monkeypatch: pytest.MonkeyPatch, fake: FakeGithubIdentityService) -> None:
-    monkeypatch.setattr(settings, "client_enrolment_mode", "github")
-    app.dependency_overrides[get_github_identity_service] = lambda: fake
-
-
-def enrolment_headers(credential: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {credential}"}
-
-
-def marge(login: str = "marge-bouvier", user_id: int = 20482231) -> GithubUserIdentity:
-    return GithubUserIdentity(github_user_id=user_id, github_login=login)
 
 
 def records_named(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:

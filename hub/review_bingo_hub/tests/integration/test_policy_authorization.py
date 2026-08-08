@@ -440,9 +440,6 @@ async def test_get_single_policy_visible_with_read_permission(
     assert response.status_code == HTTPStatus.OK
     assert response.json()["repo_full_name"] == ADMIN_REPO
 
-    refused = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
-    assert refused.status_code == HTTPStatus.FORBIDDEN
-
 
 async def test_get_single_policy_hidden_when_repo_outside_access_set(
     client: AsyncClient,

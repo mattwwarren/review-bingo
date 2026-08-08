@@ -79,7 +79,7 @@ class PolicyAuthorizationError(Exception):
     maps these at the boundary.
     """
 
-    def __init__(self, reason: str, detail: str) -> None:
+    def __init__(self, *, reason: str, detail: str) -> None:
         self.reason = reason
         self.detail = detail
         super().__init__(detail)
@@ -179,7 +179,7 @@ async def _resolve_caller_client(session: AsyncSession, credential: str) -> Revi
 
     client = await get_client_by_token(session, credential)
     if client is None:
-        raise PolicyCallerUnauthenticatedError(REASON_UNKNOWN_CALLER, DETAIL_UNKNOWN_CALLER)
+        raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
     return client
 
 
@@ -256,7 +256,7 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
     }
     if permission != PermissionLevel.ADMIN:
         LOGGER.warning("policy_write_denied", extra={**log_extra, "permission": permission})
-        raise PolicyWriteForbiddenError(REASON_NOT_ADMIN, DETAIL_NOT_ADMIN)
+        raise PolicyWriteForbiddenError(reason=REASON_NOT_ADMIN, detail=DETAIL_NOT_ADMIN)
     LOGGER.info("policy_write_authorized", extra=log_extra)
 
 

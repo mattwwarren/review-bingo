@@ -119,15 +119,11 @@ async def device_start_endpoint(github: GithubIdentityServiceDep) -> DeviceStart
     try:
         grant = await github.request_device_code()
     except GithubUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_GITHUB_UNREACHABLE
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_GITHUB_UNREACHABLE) from exc
     except GithubIdentityError as exc:
         # GitHub refusing our own client id is our misconfiguration, not the
         # caller's — so it reads as unavailable rather than as a bad request.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_LOGIN_UNCONFIGURED
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_LOGIN_UNCONFIGURED) from exc
 
     return DeviceStartResponse(
         device_code=grant.device_code,
@@ -153,9 +149,7 @@ async def device_poll_endpoint(
     try:
         result = await github.poll_device_token(payload.device_code)
     except GithubUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_GITHUB_UNREACHABLE
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=DETAIL_GITHUB_UNREACHABLE) from exc
     except GithubIdentityError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

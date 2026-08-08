@@ -178,9 +178,7 @@ async def test_device_poll_forwards_the_device_code_it_was_given(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = configured_fake(
-        monkeypatch, poll_results=[DevicePollResult(status=DevicePollStatus.PENDING)]
-    )
+    fake = configured_fake(monkeypatch, poll_results=[DevicePollResult(status=DevicePollStatus.PENDING)])
 
     await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
 
@@ -197,7 +195,7 @@ async def test_device_poll_pending_writes_nothing(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """"Not yet" is an ordinary answer, not an error, and it mints nothing."""
+    """ "Not yet" is an ordinary answer, not an error, and it mints nothing."""
     configured_fake(monkeypatch, poll_results=[DevicePollResult(status=DevicePollStatus.PENDING)])
 
     response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})

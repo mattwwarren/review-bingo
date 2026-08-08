@@ -448,7 +448,7 @@ async def test_poll_device_token_returns_the_access_token_once_authorized(
 
 
 async def test_poll_device_token_reports_pending_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
-    """"Not yet" is the flow's steady state, so it must not read as a failure."""
+    """ "Not yet" is the flow's steady state, so it must not read as a failure."""
     use_client_id(monkeypatch)
     patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture("token_poll_pending.json")))
 

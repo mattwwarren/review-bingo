@@ -7,21 +7,28 @@ FastAPI middleware executes in REVERSE order of addition:
 - First added middleware = LAST to process requests
 
 Current middleware stack (request flow):
-1. SlowAPIMiddleware (rate limiting) - added last, executes first
-2. LoggingMiddleware - added second-to-last
-3. TenantIsolationMiddleware - added third
-4. AuthMiddleware - added fourth
-5. CORSMiddleware - added first, executes last before endpoint
+1. LoggingMiddleware - added last, executes first
+2. RequireTokenMiddleware (deny-by-default gate) - added third
+3. SlowAPIMiddleware (rate limiting) - added second
+4. CORSMiddleware - added first, executes last before endpoint
 
-Response flow is the reverse (CORS first, SlowAPI last).
+Response flow is the reverse (CORS first, Logging last).
+
+AuthMiddleware and TenantIsolationMiddleware ship disabled (see the commented
+blocks below); they are not part of the stack above.
+
+RequireTokenMiddleware sits inside LoggingMiddleware so every 401 it emits
+still lands in the access log, and outside SlowAPIMiddleware so a flood of
+unauthenticated requests is rejected before it consumes rate-limit budget.
 
 Performance Implications
 ------------------------
 - CORS: Minimal overhead, only affects preflight requests
 - Rate Limiting: Redis lookup per request (~1-2ms)
+- Require Token: One header lookup and a frozenset membership test
 - Structured Logging: ContextVar operations, negligible overhead (<0.1ms)
-- Authentication: JWT validation (~5-10ms for RS256)
-- Tenant Isolation: Database lookup if not cached (~5-20ms)
+- Authentication (disabled): JWT validation (~5-10ms for RS256)
+- Tenant Isolation (disabled): Database lookup if not cached (~5-20ms)
 
 Each middleware below is commented with configuration requirements.
 Uncomment sections as needed for your deployment.
@@ -47,6 +54,7 @@ from review_bingo_hub.api.routes import router as api_router
 from review_bingo_hub.core.config import ConfigurationError, settings
 from review_bingo_hub.core.logging import LoggingMiddleware
 from review_bingo_hub.core.metrics import metrics_app
+from review_bingo_hub.core.middleware import RequireTokenMiddleware
 from review_bingo_hub.core.pagination import configure_pagination
 from review_bingo_hub.db.session import PoolConfig, create_db_engine, create_session_maker
 
@@ -168,6 +176,16 @@ limiter = Limiter(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(SlowAPIMiddleware)
+
+# Deny-by-default Token Gate
+# Every path is closed unless it is in RequireTokenMiddleware.PUBLIC_PATHS
+# (/health, /ping, /webhooks/github, /dashboard). Presence-only: the gate asks
+# whether an Authorization header exists, never whether it is valid. Per-route
+# validity still lives at the endpoint (ClientDep, webhook HMAC).
+#
+# Added after SlowAPIMiddleware so it runs BEFORE rate limiting - unauthenticated
+# traffic is turned away without spending anyone's rate-limit budget.
+app.add_middleware(RequireTokenMiddleware)
 
 # Structured Logging Middleware
 # Automatically adds request_id, user_id, org_id to all logs

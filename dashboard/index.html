@@ -298,6 +298,10 @@
 
 <script>
   const HUB = "";                 // same origin — the hub serves this page
+  // The hub denies by default; /jobs and /clients need an Authorization header
+  // to be present. Presence is all it checks — this placeholder validates
+  // nothing, and is deleted by #24 when real dashboard sessions land.
+  const AUTH_HEADER = "Bearer pending-enrolment";
   const POLL_MS = 2000;
   const LEASABLE = "queued";
   const DAUBED = new Set(["leased", "reported", "relayed"]);
@@ -318,8 +322,8 @@
   async function poll() {
     try {
       const [jobs, clients] = await Promise.all([
-        fetch(`${HUB}/jobs`).then((r) => r.json()),
-        fetch(`${HUB}/clients`).then((r) => r.json()),
+        fetch(`${HUB}/jobs`, { headers: { Authorization: AUTH_HEADER } }).then((r) => r.json()),
+        fetch(`${HUB}/clients`, { headers: { Authorization: AUTH_HEADER } }).then((r) => r.json()),
       ]);
       setHealth(true);
       latestJobs = jobs;

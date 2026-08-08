@@ -63,6 +63,12 @@ SOCKET_TIMEOUT_SECONDS = 1
 DOCKER_TIMEOUT_SECONDS = 30.0
 DOCKER_PAUSE_SECONDS = 0.5
 
+# Satisfies RequireTokenMiddleware's coarse presence check and nothing else.
+# The gate only asks "is there something to check"; per-route validity still
+# lives at the endpoint (ClientDep, webhook HMAC), so a test needing a *real*
+# token must still supply one explicitly.
+PLACEHOLDER_AUTH_HEADER = "Bearer test-fixture-placeholder"
+
 
 # =============================================================================
 # pytest-xdist Docker Coordination
@@ -578,6 +584,8 @@ async def client_bypass_auth(
                 "X-User-ID": "00000000-0000-0000-0000-000000000001",
                 "X-Email": "testuser@example.com",
                 "X-Selected-Org": "00000000-0000-0000-0000-000000000000",
+                # Presence-only: gets past RequireTokenMiddleware, validates nothing.
+                "Authorization": PLACEHOLDER_AUTH_HEADER,
             }
         )
         yield client
@@ -705,6 +713,8 @@ async def client(
                 "X-User-ID": "00000000-0000-0000-0000-000000000001",
                 "X-Email": "testuser@example.com",
                 "X-Selected-Org": "00000000-0000-0000-0000-000000000000",
+                # Presence-only: gets past RequireTokenMiddleware, validates nothing.
+                "Authorization": PLACEHOLDER_AUTH_HEADER,
             }
         )
         yield client

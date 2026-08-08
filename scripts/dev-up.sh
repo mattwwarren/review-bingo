@@ -78,9 +78,10 @@ if [[ "$HUB_HOST" != "127.0.0.1" && "$HUB_HOST" != "localhost" ]]; then
   cat <<EOF
      http://${LAN_IP:-<this-machine>}:$HUB_PORT/dashboard   (other devices on this network)
 
-   Reachable from the LAN, and the hub only checks that an Authorization
-   header is present, never that it is valid — anything on this network can
-   enqueue jobs and lease work. Fine at home; not on shared wifi.
+   Reachable from the LAN. Leasing and reading now need a credential that
+   resolves to a real client or dashboard session, but /webhooks/github
+   verifies nothing unless GITHUB_WEBHOOK_SECRET is set — so anything on this
+   network can still enqueue work. Fine at home; not on shared wifi.
 EOF
 fi
 cat <<EOF
@@ -89,9 +90,10 @@ cat <<EOF
      ngrok http $HUB_PORT
      webhook URL = https://<your-ngrok-host>/webhooks/github
 
-   Watch it work (the hub denies by default; the header only has to be
-   present, it is not validated yet):
-     curl -s -H 'Authorization: Bearer pending-enrolment' localhost:$HUB_PORT/jobs | python3 -m json.tool
+   Watch it work. Reads are scoped to what your GitHub account can reach, so
+   they need a credential that resolves to a real caller — sign in on the
+   dashboard above, or enrol the CLI and let it poll:
+     uv run client/bingo_client.py login --hub http://localhost:$HUB_PORT ...
      uv run client/bingo_client.py loop --state ~/.config/review-bingo/client.json
 EOF
 

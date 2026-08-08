@@ -100,9 +100,17 @@ class TestGatedPathsOnRealApp:
         self,
         client_no_default_headers: AsyncClient,
     ) -> None:
-        """The gate is presence-only: an unvalidated placeholder gets through."""
+        """The gate is presence-only: an unvalidated placeholder gets through.
+
+        `/policies`, not `/jobs`: A3 gave `/jobs` endpoint-level auth (ClientDep),
+        so a placeholder now clears the gate and is then rejected at the
+        endpoint — a 401 that says nothing about the middleware. `/policies` is
+        still middleware-only-gated, so it isolates the property under test.
+        A4 (#23) is what eventually adds endpoint-level auth there too, and this
+        test will need a new example path again when it does.
+        """
         response = await client_no_default_headers.get(
-            "/jobs",
+            "/policies",
             headers={"Authorization": PLACEHOLDER_AUTH},
         )
 
@@ -110,11 +118,12 @@ class TestGatedPathsOnRealApp:
 
 
 class TestDashboardReliance:
-    """Pin the two endpoints the shipped dashboard polls.
+    """Pin what the shipped dashboard's polls actually get today.
 
-    If the gate ever moved without the dashboard's header moving with it, the
-    command center would silently render an empty board. These assertions make
-    that break loudly here instead.
+    These two endpoints are the dashboard's whole data feed, so whatever they
+    answer to its placeholder header is a fact about the shipped product. Both
+    directions are asserted — no header and placeholder header — so a change to
+    either breaks loudly here rather than as a silently empty board.
     """
 
     @pytest.mark.parametrize("path", DASHBOARD_POLLED_PATHS)
@@ -129,15 +138,26 @@ class TestDashboardReliance:
         assert response.status_code == HTTPStatus.UNAUTHORIZED
 
     @pytest.mark.parametrize("path", DASHBOARD_POLLED_PATHS)
-    async def test_dashboard_polled_path_allowed_with_placeholder_header(
+    async def test_dashboard_polled_path_rejected_with_placeholder_header(
         self,
         client_no_default_headers: AsyncClient,
         path: str,
     ) -> None:
-        """With the header the dashboard actually sends, its polls resolve."""
+        """The header the dashboard actually sends no longer resolves its polls.
+
+        A3 made both polled endpoints resolve a real grid client (ClientDep),
+        and the shipped placeholder is not one. This is the intended,
+        RFC-documented transitional state — the design names it under
+        "Consequence worth naming" — and it holds until B1 (#24) gives the
+        dashboard a real login. The dashboard renders it as its own
+        "not authorized yet" state rather than as a hub outage.
+
+        Pinned as 401 rather than deleted so the day #24 lands, this test goes
+        red and asks to be updated instead of quietly staying true forever.
+        """
         response = await client_no_default_headers.get(
             path,
             headers={"Authorization": PLACEHOLDER_AUTH},
         )
 
-        assert response.status_code == HTTPStatus.OK
+        assert response.status_code == HTTPStatus.UNAUTHORIZED

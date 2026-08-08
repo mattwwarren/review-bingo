@@ -70,7 +70,9 @@ async def test_webhook_enqueues_and_dedupes(client: AsyncClient) -> None:
     response = await client.post("/webhooks/github", json=pr_payload(sha="dedupe-sha-1"), headers=PR_WEBHOOK_HEADERS)
     assert response.json()["status"] == "skipped"
 
-    response = await client.get(f"/jobs/{job_id}")
+    # Reading a job is a client-authenticated call, so this test needs one.
+    _, headers = await register_and_check_in(client, "dedupe-reader", "standard")
+    response = await client.get(f"/jobs/{job_id}", headers=headers)
     assert response.status_code == HTTPStatus.OK
     assert response.json()["state"] == "queued"
 
@@ -139,10 +141,10 @@ async def test_full_round_trip_report_relays_in_log_mode(client: AsyncClient) ->
     assert body["relay_error"] is None
     assert body["findings"][0]["line"] == 42
 
-    response = await client.get(f"/jobs/{job_id}/relay-target")
+    response = await client.get(f"/jobs/{job_id}/relay-target", headers=headers)
     assert response.json()["mode"] == "log"
 
-    response = await client.get(f"/jobs/{job_id}/comment")
+    response = await client.get(f"/jobs/{job_id}/comment", headers=headers)
     assert response.status_code == HTTPStatus.OK
     assert "review-bingo round" in response.text
     assert "src/pay.py:42" in response.text
@@ -227,12 +229,15 @@ async def test_closed_pr_cancels_its_queued_job(client: AsyncClient) -> None:
     assert response.json()["status"] == "queued"
     job_id = response.json()["job_id"]
 
+    # Registered before the cancellation so its headers can authenticate the read below.
+    _, reader_headers = await register_and_check_in(client, "cancellation-reader", "frontier")
+
     response = await client.post("/webhooks/github", json=closed, headers=PR_WEBHOOK_HEADERS)
     assert response.status_code == HTTPStatus.OK
     assert response.json()["status"] == "cancelled"
     assert response.json()["cancelled"] == 1
 
-    response = await client.get(f"/jobs/{job_id}")
+    response = await client.get(f"/jobs/{job_id}", headers=reader_headers)
     assert response.json()["state"] == "cancelled"
 
     # The whole point: a client checking in afterwards must not be handed merged code.
@@ -265,7 +270,7 @@ async def test_closed_pr_leaves_a_round_already_in_flight_alone(client: AsyncCli
     response = await client.post("/webhooks/github", json=closed, headers=PR_WEBHOOK_HEADERS)
     assert response.json()["cancelled"] == 0
 
-    response = await client.get(f"/jobs/{job_id}")
+    response = await client.get(f"/jobs/{job_id}", headers=headers)
     assert response.json()["state"] == "leased"
 
     response = await client.post(
@@ -295,7 +300,7 @@ async def test_targeted_lease_hands_over_the_named_job(client: AsyncClient) -> N
     assert lease["job"]["state"] == "leased"
     assert lease["lease_expires_at"] is not None
 
-    response = await client.get(f"/jobs/{older_id}")
+    response = await client.get(f"/jobs/{older_id}", headers=headers)
     assert response.json()["state"] == "queued"
 
 
@@ -313,7 +318,7 @@ async def test_targeted_lease_still_enforces_the_policy_floor(client: AsyncClien
     response = await client.post(f"/jobs/{job_id}/lease", headers=low_headers)
     assert response.status_code == HTTPStatus.FORBIDDEN
 
-    response = await client.get(f"/jobs/{job_id}")
+    response = await client.get(f"/jobs/{job_id}", headers=low_headers)
     assert response.json()["state"] == "queued"
 
 
@@ -353,8 +358,8 @@ async def test_concurrent_targeted_leases_have_exactly_one_winner(client: AsyncC
 
 @pytest.mark.asyncio
 async def test_client_roster_lists_capabilities(client: AsyncClient) -> None:
-    await register_and_check_in(client, "roster-client", "frontier")
-    response = await client.get("/clients")
+    _, headers = await register_and_check_in(client, "roster-client", "frontier")
+    response = await client.get("/clients", headers=headers)
     assert response.status_code == HTTPStatus.OK
     names = {c["name"]: c for c in response.json()}
     assert "roster-client" in names

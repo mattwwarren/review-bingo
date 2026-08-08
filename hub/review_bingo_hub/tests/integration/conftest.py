@@ -6,6 +6,11 @@ arrived (`test_repo_scoped_access.py`): the same fake has to stand in for
 GitHub whenever a test needs a client enrolled under a *specific* identity
 and access set, and copying it would let the two copies drift.
 
+`records_named` and `dump` made the same trip for the same reason: a second
+consumer arrived (`test_policy_authorization.py`), which asserts the policy
+authorization audit trail the way `test_client_enrolment.py` asserts the
+enrolment one.
+
 These are plain module-level helpers, not pytest fixtures — callers import
 and call them directly. They sit in `conftest.py` only because that is the
 canonical home for test-support code shared across a directory.
@@ -13,6 +18,7 @@ canonical home for test-support code shared across a directory.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pytest
@@ -70,3 +76,11 @@ def enrolment_headers(credential: str) -> dict[str, str]:
 
 def marge(login: str = "marge-bouvier", user_id: int = 20482231) -> GithubUserIdentity:
     return GithubUserIdentity(github_user_id=user_id, github_login=login)
+
+
+def records_named(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == event]
+
+
+def dump(record: logging.LogRecord) -> str:
+    return record.getMessage() + repr(record.__dict__)

@@ -36,8 +36,11 @@ from review_bingo_hub.services.identity_service import (
     DETAIL_UNKNOWN_CALLER,
     EnrolmentDeniedError,
     EnrolmentUnavailableError,
+    PolicyCallerUnauthenticatedError,
+    ScopedCaller,
     reattest_identity,
     resolve_enrolment_credential,
+    resolve_scoped_caller,
 )
 
 router = APIRouter(prefix="/clients", tags=["clients"])
@@ -59,6 +62,45 @@ async def get_current_client(
 
 
 ClientDep = Annotated[ReviewClient, Depends(get_current_client)]
+
+
+async def get_scoped_caller(
+    session: SessionDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> ScopedCaller:
+    """Resolve a *read* caller: a grid client's token, or a dashboard session's.
+
+    A sibling of get_current_client rather than a widening of it, following the
+    same reasoning get_enrolment_credential already documents: the header looks
+    identical in all three cases and the thing inside it is not, so one function
+    that "resolves whatever this bearer is" would be one function away from
+    accepting any of them at any endpoint.
+    """
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Client or session token required")
+    try:
+        return await resolve_scoped_caller(session, credentials.credentials)
+    except PolicyCallerUnauthenticatedError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+
+
+# Reads only. `PUT /policies/{owner}/{repo}` deliberately does NOT resolve
+# through this dependency: it keeps going through api/policies.py's RepoAdminDep
+# -> authorize_policy_write -> _resolve_caller_client, which accepts a
+# registered client's credential and nothing else.
+#
+# The distinction is worth a sentence because it is invisible at the call site.
+# Unifying "which bearer token authenticates a read" is a safe and useful
+# widening — the two callers resolve to the same GitHub identity and are scoped
+# by the same access set. Applying the same reasoning to a *write* would not be:
+# a dashboard session is a browser tab someone left open, and repo policy is the
+# one knob that decides which models may review a repo's code. Swapping
+# ScopedCallerDep onto that endpoint out of habit would widen who can lower a
+# model floor, and nothing at the call site would look wrong.
+#
+# So the swap is deliberately made to cost something: it requires deleting this
+# comment first.
+ScopedCallerDep = Annotated[ScopedCaller, Depends(get_scoped_caller)]
 
 
 async def get_enrolment_credential(
@@ -152,10 +194,12 @@ async def check_out_endpoint(session: SessionDep, client: ClientDep) -> ReviewCl
 @router.get("", response_model=list[ReviewClientRead])
 async def list_clients_endpoint(
     session: SessionDep,
-    client: ClientDep,
+    caller: ScopedCallerDep,
     offset: int = 0,
     limit: int = 100,
 ) -> list[ReviewClientRead]:
     """Roster for the dashboard: who's plugged in on repos this caller can see."""
-    clients = await list_clients(session, client, offset=offset, limit=limit)
+    clients = await list_clients(
+        session, identity_id=caller.identity_id, own_client_id=caller.client_id, offset=offset, limit=limit
+    )
     return [ReviewClientRead.model_validate(c) for c in clients]

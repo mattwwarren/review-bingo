@@ -1,6 +1,6 @@
 """Tests for the GitHub identity seam: what a user token tells the hub.
 
-Two things are pinned here and they are not equally obvious:
+Three things are pinned here and they are not equally obvious:
 
 1. The permission collapse. GitHub reports five booleans; the schema stores
    one level. The mapping decides who can later lower a repo's model floor,
@@ -8,6 +8,10 @@ Two things are pinned here and they are not equally obvious:
 2. The token never reaching a log record. Asserted as a substring search over
    every captured record at DEBUG, because a "safe" prefix/length is still a
    leak of the only secret in this code path.
+3. The device flow's error taxonomy. GitHub answers a poll with HTTP 200 and
+   an `error` field, and only two of the five answers mean "keep going".
+   Collapsing them into "not yet" is how a client ends up polling github.com
+   forever after the person clicked Deny — so each answer gets its own test.
 """
 
 from __future__ import annotations
@@ -345,3 +349,183 @@ async def test_get_repo_access_raises_when_the_envelope_shape_is_unexpected(monk
 
 def test_get_github_identity_service_returns_the_live_implementation() -> None:
     assert isinstance(svc.get_github_identity_service(), svc.LiveGithubIdentityService)
+
+
+# ---------------------------------------------------------------------------
+# Device flow — the hub-side half of what client/bingo_client.py already does
+# ---------------------------------------------------------------------------
+
+CLIENT_ID = "Iv23liTESTCLIENTID00"
+
+
+def use_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "github_app_client_id", CLIENT_ID)
+
+
+async def test_request_device_code_returns_the_grant_github_issued(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_client_id(monkeypatch)
+    body = load_fixture("device_code_grant.json")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json=body)
+
+    patch_transport(monkeypatch, handler)
+
+    grant = await svc.LiveGithubIdentityService().request_device_code()
+
+    assert seen["path"] == "/login/device/code"
+    assert CLIENT_ID in seen["body"]
+    assert grant.device_code == body["device_code"]
+    assert grant.user_code == body["user_code"]
+    assert grant.verification_uri == body["verification_uri"]
+    assert grant.expires_in == body["expires_in"]
+    assert grant.interval == body["interval"]
+
+
+async def test_request_device_code_raises_when_github_refuses_the_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body carrying `error` instead of `device_code` is a rejection, not a grant.
+
+    GitHub answers this one with HTTP 200, so only reading the body catches it —
+    a status-only check would hand the caller a grant with no device code in it.
+    """
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json={"error": "unauthorized_client"}))
+
+    with pytest.raises(svc.GithubIdentityError) as exc_info:
+        await svc.LiveGithubIdentityService().request_device_code()
+
+    assert not isinstance(exc_info.value, svc.GithubUnavailableError)
+
+
+async def test_request_device_code_raises_unavailable_on_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(500, json={"message": "boom"}))
+
+    with pytest.raises(svc.GithubUnavailableError):
+        await svc.LiveGithubIdentityService().request_device_code()
+
+
+async def test_request_device_code_raises_unavailable_when_github_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_client_id(monkeypatch)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        error_msg = "name resolution failed"
+        raise httpx.ConnectError(error_msg)
+
+    patch_transport(monkeypatch, handler)
+
+    with pytest.raises(svc.GithubUnavailableError):
+        await svc.LiveGithubIdentityService().request_device_code()
+
+
+async def test_poll_device_token_returns_the_access_token_once_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_client_id(monkeypatch)
+    body = load_fixture("token_poll_success.json")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json=body)
+
+    patch_transport(monkeypatch, handler)
+
+    result = await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+    assert seen["path"] == "/login/oauth/access_token"
+    assert "device-code-abc" in seen["body"]
+    assert result.status is svc.DevicePollStatus.AUTHORIZED
+    assert result.access_token == body["access_token"]
+
+
+async def test_poll_device_token_reports_pending_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "Not yet" is the flow's steady state, so it must not read as a failure."""
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture("token_poll_pending.json")))
+
+    result = await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+    assert result.status is svc.DevicePollStatus.PENDING
+    assert result.access_token is None
+
+
+async def test_poll_device_token_carries_the_new_interval_on_slow_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub dictates the new floor; dropping it earns a ban rather than a token."""
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture("token_poll_slow_down.json")))
+
+    result = await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+    assert result.status is svc.DevicePollStatus.SLOW_DOWN
+    assert result.interval == 10
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected"),
+    [
+        ("token_poll_expired.json", svc.DevicePollStatus.EXPIRED),
+        ("token_poll_denied.json", svc.DevicePollStatus.DENIED),
+    ],
+)
+async def test_poll_device_token_reports_terminal_answers_distinctly(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture: str,
+    expected: svc.DevicePollStatus,
+) -> None:
+    """Expired and denied are both final, and they are not the same fact.
+
+    One says "start again", the other says "the person said no". A caller that
+    cannot tell them apart either nags someone who refused, or gives up on
+    someone who just took too long.
+    """
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture(fixture)))
+
+    result = await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+    assert result.status is expected
+    assert result.access_token is None
+
+
+async def test_poll_device_token_raises_on_an_error_code_we_do_not_know(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmapped error is a reading about GitHub's contract, not a "keep polling".
+
+    Failing loudly here is the same instrument the strict parsing above is:
+    the fixtures in this suite are hand-built, so production traffic is the only
+    thing that can tell us where our model of the flow is wrong.
+    """
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json={"error": "incorrect_client_credentials"}))
+
+    with pytest.raises(svc.GithubIdentityError):
+        await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+
+async def test_device_flow_logs_no_token_material(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The token GitHub hands back is as secret as the one enrolment spends."""
+    use_client_id(monkeypatch)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture("token_poll_success.json")))
+
+    with caplog.at_level(logging.DEBUG):
+        result = await svc.LiveGithubIdentityService().poll_device_token("device-code-abc")
+
+    assert result.access_token is not None
+    for record in caplog.records:
+        rendered = record.getMessage() + json.dumps(record.__dict__, default=str)
+        assert result.access_token not in rendered
+        assert result.access_token[:8] not in rendered
+        assert result.access_token[-8:] not in rendered

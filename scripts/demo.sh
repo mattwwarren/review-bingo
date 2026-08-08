@@ -15,12 +15,6 @@ PG_IMAGE="${PG_IMAGE:-postgres:18.1-alpine}"
 STATE_FILE="$(mktemp -t bingo-demo-client.XXXXXX.json)"
 HUB_LOG="$(mktemp -t bingo-demo-hub.XXXXXX.log)"
 
-# The hub denies by default: every path outside /health, /ping,
-# /webhooks/github and /dashboard needs an Authorization header present. The
-# gate checks presence, not validity, so this placeholder is enough for the
-# demo's read-only curls.
-AUTH_HEADER='Authorization: Bearer pending-enrolment'
-
 # Joining the grid is a different question, and in the real world it is
 # answered by GitHub: the client completes a device flow and hands the hub the
 # resulting user token. The demo has to run offline with no GitHub App, so it
@@ -65,8 +59,12 @@ done
 curl -sf "localhost:$HUB_PORT/ping" >/dev/null || { echo "hub failed to start; log:"; tail -20 "$HUB_LOG"; exit 1; }
 
 say "Setting a policy floor: acme/payments requires tier >= standard"
+# Setting a repo's model floor takes GitHub-recorded admin on that repo. Dev
+# mode has no GitHub account to ask, so the shared enrolment secret stands in —
+# the same named bypass POST /clients uses, not a second one. This runs before
+# any client exists, which is why it cannot use a client's own token.
 curl -sf -X PUT "localhost:$HUB_PORT/policies/acme/payments" \
-  -H "$AUTH_HEADER" \
+  -H "Authorization: Bearer $CLIENT_ENROLMENT_SECRET" \
   -H 'content-type: application/json' \
   -d '{"min_tier": "standard"}' | python3 -m json.tool
 
@@ -82,11 +80,19 @@ uv run client/bingo_client.py register --state "$STATE_FILE" \
   --enrolment-token "$CLIENT_ENROLMENT_SECRET"
 uv run client/bingo_client.py check-in --state "$STATE_FILE"
 
+# The reads below need a credential that resolves to a real caller, not merely a
+# header that exists. The client's own bearer token is the one the demo has, and
+# it is already sitting in the state file `register` just wrote.
+CLIENT_AUTH="Authorization: Bearer $(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1]))["token"])
+' "$STATE_FILE")"
+
 say "One round: lease -> review (canned; set REVIEW_CMD to bring your own) -> report"
 uv run client/bingo_client.py run-once --state "$STATE_FILE"
 
 say "Job state after the round"
-JOB_ID="$(curl -sf -H "$AUTH_HEADER" "localhost:$HUB_PORT/jobs" | python3 -c '
+JOB_ID="$(curl -sf -H "$CLIENT_AUTH" "localhost:$HUB_PORT/jobs" | python3 -c '
 import json, sys
 jobs = json.load(sys.stdin)
 for j in jobs:
@@ -95,7 +101,7 @@ print(jobs[0]["id"])
 ')"
 
 say "The comment that would land on the PR (relay is in log mode)"
-curl -sf -H "$AUTH_HEADER" "localhost:$HUB_PORT/jobs/$JOB_ID/comment"
+curl -sf -H "$CLIENT_AUTH" "localhost:$HUB_PORT/jobs/$JOB_ID/comment"
 
 say "Client checks out"
 uv run client/bingo_client.py check-out --state "$STATE_FILE"

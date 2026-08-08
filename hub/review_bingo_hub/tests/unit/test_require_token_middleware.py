@@ -55,6 +55,14 @@ def app_with_require_token_middleware() -> FastAPI:
     async def dashboard() -> dict[str, str]:
         return {"page": "dashboard"}
 
+    @app.post("/auth/device/start")
+    async def device_start() -> dict[str, str]:
+        return {"status": "started"}
+
+    @app.post("/auth/device/poll")
+    async def device_poll() -> dict[str, str]:
+        return {"status": "authorization_pending"}
+
     @app.api_route("/jobs", methods=["GET", "OPTIONS"])
     async def jobs() -> dict[str, str]:
         return {"status": "ok"}
@@ -66,8 +74,26 @@ class TestPublicPaths:
     """Tests pinning the contents of the allowlist itself."""
 
     def test_public_paths_contents_is_exact(self) -> None:
-        """The allowlist is exactly these four paths - nothing else is public."""
-        assert frozenset({"/health", "/ping", "/webhooks/github", "/dashboard"}) == PUBLIC_PATHS
+        """The allowlist is exactly these six paths - nothing else is public.
+
+        The device-flow pair joined it with B1 (#24): the whole point of those
+        two endpoints is that the caller has no credential yet, so gating them
+        on one would make logging in impossible for anyone not already logged
+        in.
+        """
+        assert (
+            frozenset(
+                {
+                    "/health",
+                    "/ping",
+                    "/webhooks/github",
+                    "/dashboard",
+                    "/auth/device/start",
+                    "/auth/device/poll",
+                }
+            )
+            == PUBLIC_PATHS
+        )
 
     def test_public_paths_is_immutable(self) -> None:
         """The allowlist is a frozenset so no caller can widen it at runtime."""
@@ -104,6 +130,22 @@ class TestRequireTokenMiddleware:
             base_url="http://test",
         ) as client:
             response = await client.post("/webhooks/github", json={})
+
+        assert response.status_code == HTTPStatus.OK
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("path", ["/auth/device/start", "/auth/device/poll"])
+    async def test_device_flow_paths_pass_without_token(
+        self,
+        app_with_require_token_middleware: FastAPI,
+        path: str,
+    ) -> None:
+        """Logging in cannot require being logged in - both device paths are open."""
+        async with AsyncClient(
+            transport=ASGITransport(app=app_with_require_token_middleware),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(path, json={})
 
         assert response.status_code == HTTPStatus.OK
 

@@ -12,18 +12,31 @@ Two kinds of file live here, and the difference matters more than it looks.
 
 ## Synthesized (hand-built — treat their shape as a hypothesis)
 
-These three were **hand-built from GitHub's REST documentation**, not captured
+These were **hand-built from GitHub's REST documentation**, not captured
 against a live token, because obtaining one requires completing the device flow
 against a real App installation:
 
 - `user_identity.json` — `GET /user`
 - `user_installations.json` — `GET /user/installations`
 - `installation_repositories.json` — `GET /user/installations/{id}/repositories`
+- `device_code_grant.json` — `POST https://github.com/login/device/code`
+- `token_poll_{success,pending,slow_down,expired,denied}.json` —
+  `POST https://github.com/login/oauth/access_token`, one file per answer the
+  device flow can give
+
+The device-flow six carry the same disclosure and the same blocker as the three
+above — capturing them means completing a live OAuth handshake, which is the
+very thing the fixtures stand in for. Their shape is mirrored from
+`client/test_bingo_client.py`, which has encoded the same handshake since A1
+(#20): the CLI and the hub broker one flow, so a hub-side fixture that
+disagreed with the CLI's would hide exactly the drift worth catching.
 
 They carry only the fields `github_identity_service` actually reads
 (`id`/`login`; `installations[].id`/`app_id`; `repositories[].full_name`/
-`permissions`), plus enough neighbours to keep the envelope shape honest
-(`total_count`). Because they encode our belief rather than an observation,
+`permissions`; `device_code`/`user_code`/`verification_uri`/`expires_in`/
+`interval`; `access_token`/`error`/`interval`), plus enough neighbours to keep
+the envelope shape honest (`total_count`, `error_description`/`error_uri`).
+Because they encode our belief rather than an observation,
 they cannot falsify that belief — they pin the mapping logic (permission
 collapse, app-id filtering, pagination), not GitHub's contract.
 

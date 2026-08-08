@@ -521,3 +521,52 @@ class TestIdentityAccessTtlConfig:
             Settings()
 
         assert "IDENTITY_ACCESS_TTL_SECONDS" in str(exc_info.value)
+
+
+class TestDashboardSessionTtlConfig:
+    """How long a dashboard login lasts before the person signs in again.
+
+    Deliberately its own knob rather than a reuse of IDENTITY_ACCESS_TTL_SECONDS:
+    that one bounds how stale a *cached authorization* may be before the hub
+    dispatches work against it, this one bounds how long a person stays signed
+    in. Tying them would mean tightening dispatch safety by logging everybody
+    out.
+    """
+
+    def test_dashboard_session_ttl_seconds_defaults_to_12_hours(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DASHBOARD_SESSION_TTL_SECONDS", raising=False)
+
+        settings = Settings()
+
+        assert settings.dashboard_session_ttl_seconds == 12 * 60 * 60
+
+    def test_dashboard_session_ttl_seconds_configurable_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("DASHBOARD_SESSION_TTL_SECONDS", "3600")
+
+        settings = Settings()
+
+        assert settings.dashboard_session_ttl_seconds == 3600
+
+    def test_dashboard_session_ttl_seconds_rejects_below_floor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A sub-minute session would log a person out mid-poll."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("DASHBOARD_SESSION_TTL_SECONDS", "5")
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings()
+
+        assert "DASHBOARD_SESSION_TTL_SECONDS" in str(exc_info.value)

@@ -16,9 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from review_bingo_hub.db.session import get_session
 from review_bingo_hub.main import app
+from review_bingo_hub.tests.integration.conftest import (
+    ALLOWED,
+    Enrolee,
+    FakeGithubIdentityService,
+    readable,
+    start_dashboard_session,
+)
 
-# The placeholder the demo scripts, the client CLI, and the dashboard all send.
-# It authenticates nothing; it only satisfies the coarse presence check.
+# The placeholder the demo scripts and the dashboard used to send before B1
+# (#24). It authenticated nothing then and resolves to nobody now; it is kept
+# here as the literal a stale deployment would still be sending.
 PLACEHOLDER_AUTH = "Bearer pending-enrolment"
 
 GATED_PATHS = ["/jobs", "/clients", "/policies/acme/repo", "/policies", "/users", "/docs", "/openapi.json"]
@@ -67,6 +75,23 @@ class TestPublicPathsOnRealApp:
         response = await client_no_default_headers.get(path)
 
         assert response.status_code == HTTPStatus.OK
+
+    @pytest.mark.parametrize("path", ["/auth/device/start", "/auth/device/poll"])
+    async def test_device_flow_path_reachable_without_token(
+        self,
+        client_no_default_headers: AsyncClient,
+        path: str,
+    ) -> None:
+        """The login endpoints answer for a stranger, because a stranger is who uses them.
+
+        503 rather than 200: no GITHUB_APP_CLIENT_ID is configured in the test
+        suite, so the handler itself refuses. That is the point — the request
+        reached a handler at all, which is what the gate decides.
+        """
+        response = await client_no_default_headers.post(path, json={"device_code": "abc"})
+
+        assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+        assert response.json() != {"detail": "Authentication required"}
 
 
 class TestGatedPathsOnRealApp:
@@ -138,26 +163,34 @@ class TestDashboardReliance:
         assert response.status_code == HTTPStatus.UNAUTHORIZED
 
     @pytest.mark.parametrize("path", DASHBOARD_POLLED_PATHS)
-    async def test_dashboard_polled_path_rejected_with_placeholder_header(
+    async def test_dashboard_polled_path_accepts_real_session_rejects_placeholder(
         self,
         client_no_default_headers: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
         path: str,
     ) -> None:
-        """The header the dashboard actually sends no longer resolves its polls.
+        """B1 (#24) has landed: the dashboard now polls with a credential that resolves.
 
-        A3 made both polled endpoints resolve a real grid client (ClientDep),
-        and the shipped placeholder is not one. This is the intended,
-        RFC-documented transitional state — the design names it under
-        "Consequence worth naming" — and it holds until B1 (#24) gives the
-        dashboard a real login. The dashboard renders it as its own
-        "not authorized yet" state rather than as a hub outage.
+        This test used to pin the opposite — 401 for everyone, including the
+        `"Bearer pending-enrolment"` placeholder the page shipped with — and said
+        it would go red the day a real login arrived. It has, so both halves are
+        asserted here instead of one:
 
-        Pinned as 401 rather than deleted so the day #24 lands, this test goes
-        red and asks to be updated instead of quietly staying true forever.
+        (a) a freshly minted `dashboard_session` token is *accepted*, which is
+            the whole product change; and
+        (b) the placeholder is still *rejected*, because it now resolves to
+            neither a `ReviewClient` nor a `dashboard_session` — a stale
+            deployment sending it gets a refusal, not a partial view.
         """
-        response = await client_no_default_headers.get(
-            path,
-            headers={"Authorization": PLACEHOLDER_AUTH},
+        session_headers = await start_dashboard_session(
+            client_no_default_headers,
+            monkeypatch,
+            FakeGithubIdentityService(),
+            Enrolee(login="polling-viewer", user_id=77, repo_access=[readable(ALLOWED)]),
         )
 
-        assert response.status_code == HTTPStatus.UNAUTHORIZED
+        accepted = await client_no_default_headers.get(path, headers=session_headers)
+        rejected = await client_no_default_headers.get(path, headers={"Authorization": PLACEHOLDER_AUTH})
+
+        assert accepted.status_code == HTTPStatus.OK
+        assert rejected.status_code == HTTPStatus.UNAUTHORIZED

@@ -270,6 +270,25 @@
 
   .muted { color: var(--dim); font-size: 13px; line-height: 1.5; margin: 0; }
 
+  /* ---- sign-in --------------------------------------------------------- */
+
+  /* Inline above the card rather than a modal over it: the board behind is
+     empty until you sign in, so there is nothing to dim and nothing to trap
+     focus away from. */
+  .signin {
+    margin: 28px 28px 0;
+    border: 1px solid #2C3372;
+    border-radius: 3px;
+    background: var(--ink-2);
+    padding: 22px;
+    display: grid;
+    gap: 12px;
+    justify-items: start;
+    max-width: 560px;
+  }
+  .signin[hidden] { display: none; }
+  .signin-link { color: var(--signal); }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; }
   }
@@ -282,6 +301,24 @@
   <div class="tally pulse" id="health" data-live="true">hub live</div>
   <div class="tally" id="tally"></div>
 </header>
+
+<section class="signin" id="signin" hidden aria-live="polite">
+  <p class="eyebrow" style="margin:0">Sign in</p>
+  <p class="muted">
+    The card shows work for repos your GitHub account can reach — so the hub has
+    to know which account is looking. Signing in uses GitHub's device flow: no
+    password reaches this page, and the hub never stores your GitHub token.
+  </p>
+  <button class="copy" type="button" id="signin-start">Sign in with GitHub</button>
+  <div class="signin-step" id="signin-step" hidden>
+    <p class="muted">
+      Open <a class="signin-link" id="signin-uri" href="#" target="_blank" rel="noopener noreferrer"></a>
+      and enter this code:
+    </p>
+    <code class="handoff" id="signin-user-code"></code>
+    <p class="muted" id="signin-status">Waiting for you to authorize on github.com…</p>
+  </div>
+</section>
 
 <main class="hall">
   <section>
@@ -304,10 +341,7 @@
 
 <script>
   const HUB = "";                 // same origin — the hub serves this page
-  // The hub denies by default; /jobs and /clients need an Authorization header
-  // to be present. Presence is all it checks — this placeholder validates
-  // nothing, and is deleted by #24 when real dashboard sessions land.
-  const AUTH_HEADER = "Bearer pending-enrolment";
+  const SESSION_KEY = "review-bingo.session";
   const POLL_MS = 2000;
   const LEASABLE = "queued";
   const DAUBED = new Set(["leased", "reported", "relayed"]);
@@ -315,6 +349,8 @@
   let selectedId = null;
   let latestJobs = [];
   let pickedSignature = null;
+  let session = null;
+  let loginTimer = null;
   const cellsById = new Map();   // job id -> its <li>, so cells are reused, not rebuilt
 
   const el = {
@@ -323,20 +359,84 @@
     tally: document.getElementById("tally"),
     health: document.getElementById("health"),
     picked: document.getElementById("picked"),
+    signin: document.getElementById("signin"),
+    signinStart: document.getElementById("signin-start"),
+    signinStep: document.getElementById("signin-step"),
+    signinUri: document.getElementById("signin-uri"),
+    signinUserCode: document.getElementById("signin-user-code"),
+    signinStatus: document.getElementById("signin-status"),
   };
 
+  /* ---- the session -------------------------------------------------------
+     The hub mints an opaque bearer token at login and stores only its digest,
+     so this copy is the only usable one — and it lives in localStorage rather
+     than a cookie because the hub authenticates by Authorization header, and a
+     credential the browser attaches automatically is a credential a cross-site
+     request can spend. */
+
+  function loadSession() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+      if (!saved || !saved.token) return null;
+      // Drop an expiry we can already see has passed rather than spending a
+      // poll to be told 401: same outcome, one fewer confusing round trip.
+      if (saved.expires_at && Date.parse(saved.expires_at) <= Date.now()) {
+        localStorage.removeItem(SESSION_KEY);
+        return null;
+      }
+      return saved;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveSession(next) {
+    session = next;
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(next)); } catch {}
+    el.signin.hidden = true;
+  }
+
+  function clearSession() {
+    session = null;
+    try { localStorage.removeItem(SESSION_KEY); } catch {}
+  }
+
+  function showLogin() {
+    clearTimeout(loginTimer);
+    el.signin.hidden = false;
+    // Every path that reveals this panel — first load, an expired session, a
+    // revoked one — must leave the button clickable. startLogin() disables it
+    // for the duration of one attempt; without this reset, a session that
+    // later expires would reopen the panel with a button nothing re-enabled.
+    el.signinStart.disabled = false;
+    el.signinStart.textContent = "Sign in with GitHub";
+  }
+
   async function poll() {
+    // No session is not an error state: it is the page's starting condition,
+    // and it routes to the same "hub live, you are not authorized" pulse a
+    // rejected poll does — never to "hub unreachable", which would send an
+    // operator looking at the network for a login problem.
+    if (!session) {
+      setHealth("unauthorized");
+      showLogin();
+      return;
+    }
     try {
       const [jobsRes, clientsRes] = await Promise.all([
-        fetch(`${HUB}/jobs`, { headers: { Authorization: AUTH_HEADER } }),
-        fetch(`${HUB}/clients`, { headers: { Authorization: AUTH_HEADER } }),
+        fetch(`${HUB}/jobs`, { headers: authHeaders() }),
+        fetch(`${HUB}/clients`, { headers: authHeaders() }),
       ]);
 
       // Check the status before parsing. A 401 body parses perfectly well, and
       // an object arriving where an array belongs would fail somewhere in
       // rendering — reported as "hub unreachable", which it plainly is not.
       if ([jobsRes.status, clientsRes.status].some((s) => s === 401 || s === 403)) {
+        // Expired or revoked. Drop it and ask for a new one rather than
+        // polling twice a second against a credential the hub refuses.
+        clearSession();
         setHealth("unauthorized");
+        showLogin();
         return;
       }
       if (!jobsRes.ok || !clientsRes.ok) {
@@ -363,15 +463,94 @@
     }
   }
 
+  function authHeaders() {
+    return { Authorization: `Bearer ${session.token}` };
+  }
+
+  /* ---- signing in --------------------------------------------------------
+     GitHub's device flow, brokered by the hub: this page cannot hold the App's
+     client id or talk to github.com's token endpoint cross-origin, so it asks
+     the hub to open the flow and then polls the hub, not GitHub. */
+
+  async function startLogin() {
+    el.signinStart.disabled = true;
+    el.signinStatus.textContent = "Waiting for you to authorize on github.com…";
+    try {
+      const response = await fetch(`${HUB}/auth/device/start`, { method: "POST" });
+      const grant = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        loginFailed(errorDetail(grant, "Could not start sign-in."));
+        return;
+      }
+      el.signinUri.textContent = grant.verification_uri;
+      el.signinUri.href = grant.verification_uri;
+      el.signinUserCode.textContent = grant.user_code;
+      el.signinStep.hidden = false;
+      pollLogin(grant.device_code, grant.interval);
+    } catch {
+      loginFailed("Could not reach the hub to start sign-in.");
+    }
+  }
+
+  /* One timer, rescheduled per answer, rather than a fixed interval: GitHub
+     can raise the floor mid-flow (slow_down) and the hub passes that on.
+     Polling faster than we were told earns a ban, not a token. */
+  function pollLogin(deviceCode, intervalSeconds) {
+    clearTimeout(loginTimer);
+    loginTimer = setTimeout(async () => {
+      try {
+        const response = await fetch(`${HUB}/auth/device/poll`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ device_code: deviceCode }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          loginFailed(errorDetail(body, "Sign-in did not complete."));
+          return;
+        }
+        if (body.status === "authorized") {
+          saveSession({
+            token: body.session_token,
+            expires_at: body.expires_at,
+            github_login: body.github_login,
+          });
+          el.signinStep.hidden = true;
+          poll();
+          return;
+        }
+        pollLogin(deviceCode, body.interval || intervalSeconds);
+      } catch {
+        loginFailed("Lost the hub while signing in.");
+      }
+    }, Math.max(intervalSeconds || 5, 1) * 1000);
+  }
+
+  // FastAPI's own HTTPException(detail=...) paths always send a plain string,
+  // but a 422 the framework raises itself (a malformed body, before this
+  // page's own handler ever runs) sends `detail` as a list of {loc,msg,type}
+  // objects instead — not a string this UI can display as-is.
+  function errorDetail(body, fallback) {
+    return typeof body.detail === "string" ? body.detail : fallback;
+  }
+
+  function loginFailed(message) {
+    clearTimeout(loginTimer);
+    el.signinStep.hidden = false;
+    el.signinStatus.textContent = `${message} Start again when you're ready.`;
+    el.signinStart.disabled = false;
+    el.signinStart.textContent = "Try again";
+  }
+
   // Three states, not two: a hub that is up but rejecting us is a different
   // fact from a hub that is down, and pointing an operator at the network when
-  // the answer is "log in" costs real debugging time.
+  // the answer is "sign in" costs real debugging time.
   function setHealth(state) {
     const mode = state === "unauthorized" ? "unauthorized" : state ? "true" : "false";
     el.health.dataset.live = mode;
     el.health.textContent =
       mode === "true" ? "hub live" :
-      mode === "unauthorized" ? "hub live — dashboard not authorized yet (#24)" :
+      mode === "unauthorized" ? "hub live — sign in to see your card" :
       "hub unreachable";
   }
 
@@ -529,6 +708,8 @@
     );
   }
 
+  el.signinStart.addEventListener("click", startLogin);
+  session = loadSession();
   poll();
   setInterval(poll, POLL_MS);
 </script>

@@ -24,6 +24,21 @@ async def test_dashboard_is_served_as_html(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dashboard_no_longer_ships_the_placeholder_credential(client: AsyncClient) -> None:
+    """The shipped page must not carry `Bearer pending-enrolment` any more.
+
+    Asserted against the served bytes rather than the source file: what matters
+    is what a browser receives. B1 (#24) replaced that placeholder with a real
+    device-flow login, and a leftover copy would send every visitor down a path
+    that authenticates nothing and renders as "not authorized" forever.
+    """
+    response = await client.get("/dashboard")
+
+    assert response.status_code == HTTPStatus.OK
+    assert "pending-enrolment" not in response.text
+
+
+@pytest.mark.asyncio
 async def test_dashboard_says_so_when_it_was_not_deployed(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

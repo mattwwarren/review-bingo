@@ -87,9 +87,16 @@ class FakeGithubIdentityService:
     # of its time in.
     poll_results: list[DevicePollResult] = field(default_factory=list)
     device_codes_seen: list[str] = field(default_factory=list)
+    # Separate from `error` so a test can script "GitHub authorized the device
+    # code, then failed on the identity read" — a real window, since those are
+    # two calls seconds apart, and the one place a login can fail after the
+    # person has already said yes.
+    identity_error: Exception | None = None
 
     async def get_identity(self, token: str) -> GithubUserIdentity:
         self._record(token)
+        if self.identity_error is not None:
+            raise self.identity_error
         if self.error is not None:
             raise self.error
         assert self.identity is not None
@@ -97,6 +104,8 @@ class FakeGithubIdentityService:
 
     async def get_repo_access(self, token: str) -> list[GithubRepoAccess]:
         self._record(token)
+        if self.identity_error is not None:
+            raise self.identity_error
         if self.error is not None:
             raise self.error
         return list(self.repo_access or [])

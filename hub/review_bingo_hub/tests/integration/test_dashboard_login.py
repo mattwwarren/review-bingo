@@ -36,6 +36,7 @@ from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.github_identity_service import (
     DevicePollResult,
     DevicePollStatus,
+    GithubIdentityError,
     GithubUnavailableError,
 )
 from review_bingo_hub.tests.integration.conftest import (
@@ -129,6 +130,23 @@ async def test_device_start_is_503_when_github_is_unreachable(
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
 
 
+async def test_device_start_is_503_when_github_refuses_our_client_id(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client id GitHub rejects is our misconfiguration, not the caller's mistake.
+
+    So it reads as 503 alongside the unset-client-id case, rather than as a 4xx
+    that would tell the person at the browser to try something different. There
+    is nothing they can do differently.
+    """
+    configured_fake(monkeypatch, error=GithubIdentityError("unauthorized_client"))
+
+    response = await client.post("/auth/device/start")
+
+    assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+
+
 # ---------------------------------------------------------------------------
 # POST /auth/device/poll — the request contract
 # ---------------------------------------------------------------------------
@@ -212,7 +230,7 @@ async def test_device_poll_slow_down_carries_the_new_interval(
 
 
 @pytest.mark.parametrize(
-    ("status", "reason"),
+    "case",
     [
         (DevicePollStatus.EXPIRED, "device_token_expired"),
         (DevicePollStatus.DENIED, "device_access_denied"),
@@ -223,15 +241,15 @@ async def test_device_poll_terminal_refusal_is_400_and_audited(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    status: DevicePollStatus,
-    reason: str,
+    case: tuple[DevicePollStatus, str],
 ) -> None:
     """A refusal reuses `enrolment_denied` with a device-specific reason.
 
     A second denial event would split one audit question — "who was refused
     admission, and why" — across two log names nobody remembers to grep both of.
     """
-    configured_fake(monkeypatch, poll_results=[DevicePollResult(status=status)])
+    poll_status, reason = case
+    configured_fake(monkeypatch, poll_results=[DevicePollResult(status=poll_status)])
 
     with caplog.at_level(logging.DEBUG):
         response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
@@ -255,6 +273,52 @@ async def test_device_poll_fails_closed_when_github_is_unreachable(
     response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
 
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert await row_counts(session) == (0, 0)
+
+
+async def test_device_poll_is_400_when_github_answers_with_an_error_we_do_not_know(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmapped GitHub error stops the flow rather than reading as "not yet"."""
+    configured_fake(monkeypatch, error=GithubIdentityError("incorrect_client_credentials"))
+
+    response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
+
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert await row_counts(session) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (GithubUnavailableError("connection refused"), HTTPStatus.SERVICE_UNAVAILABLE),
+        (GithubIdentityError("Bad credentials"), HTTPStatus.UNAUTHORIZED),
+    ],
+)
+async def test_device_poll_fails_closed_when_the_identity_read_fails_after_authorization(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[Exception, HTTPStatus],
+) -> None:
+    """GitHub can authorize the code and then fail the identity read seconds later.
+
+    The two are separate calls, so this window is real. Whichever way it fails,
+    no session is minted — a login that half-succeeded would be a credential
+    scoped by an access set the hub never actually read.
+    """
+    identity_error, expected_status = case
+    fake = configured_fake(
+        monkeypatch,
+        poll_results=[DevicePollResult(status=DevicePollStatus.AUTHORIZED, access_token=GITHUB_TOKEN)],
+    )
+    fake.identity_error = identity_error
+
+    response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
+
+    assert response.status_code == expected_status
     assert await row_counts(session) == (0, 0)
 
 

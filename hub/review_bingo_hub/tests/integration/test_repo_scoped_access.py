@@ -27,10 +27,12 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
-from review_bingo_hub.models.github_identity import PermissionLevel
+from review_bingo_hub.models.github_identity import IdentityRepoAccess, PermissionLevel
 from review_bingo_hub.models.review_client import ReviewClient, ReviewClientCreate
 from review_bingo_hub.services.client_service import register_client
 from review_bingo_hub.services.github_identity_service import GithubRepoAccess
@@ -331,6 +333,49 @@ async def test_targeted_lease_in_access_hands_the_job_over(
     lease = response.json()
     assert lease["job"]["id"] == job_id
     assert lease["job"]["state"] == "leased"
+
+
+async def test_report_succeeds_after_access_narrows_post_lease(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Holding the lease is enough to report, even if access has since narrowed.
+
+    Pins `report_job_endpoint`'s deliberate exception: it stays on the
+    unscoped `get_job` rather than `get_job_for_client`, because refusing a
+    report over a since-narrowed access snapshot would destroy a client's
+    finished work without protecting anything the caller couldn't already
+    reach when the lease was granted.
+    """
+    job_id = await enqueue(client, ALLOWED, "narrows-after-lease")
+
+    fake = FakeGithubIdentityService()
+    client_id, headers = await enrol_github_client(
+        client, monkeypatch, fake, Enrolee(login="narrows", user_id=1, repo_access=[readable(ALLOWED)])
+    )
+
+    lease = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+    assert lease.status_code == HTTPStatus.OK
+    assert lease.json()["job"]["id"] == job_id
+
+    # Simulate the account's GitHub access narrowing after the lease was
+    # granted, ahead of A2's own re-attestation: drop the identity's
+    # IdentityRepoAccess rows directly.
+    grid_client = (
+        await session.execute(select(ReviewClient).where(col(ReviewClient.id) == UUID(client_id)))
+    ).scalar_one()
+    await session.execute(
+        delete(IdentityRepoAccess).where(col(IdentityRepoAccess.identity_id) == grid_client.identity_id)
+    )
+    await session.commit()
+    assert await accessible_repo_names(session, grid_client) == frozenset()
+
+    report = {"verdict": "approve", "summary": "Nothing found.", "findings": []}
+    response = await client.post(f"/jobs/{job_id}/report", json=report, headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["state"] == "relayed"
 
 
 # ---------------------------------------------------------------------------

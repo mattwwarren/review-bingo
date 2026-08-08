@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import Select, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
@@ -27,6 +27,21 @@ from review_bingo_hub.models.review_job import (
 from review_bingo_hub.services.identity_service import accessible_repo_names
 
 ACTIVE_STATES = (JobState.QUEUED, JobState.LEASED)
+
+
+async def _filter_to_access(session: AsyncSession, client: ReviewClient, query: Select) -> Select:
+    """AND the caller's access set onto a ReviewJob query, or leave it untouched.
+
+    The one place `lease_next_job`, `lease_specific_job`, and `list_jobs` apply
+    the access-set filter, so the three call sites can't drift into three
+    slightly different where-clauses. ANDs with any other repo_full_name filter
+    already on `query` — asking for a repo outside the access set is an
+    ordinary empty result, not a special case.
+    """
+    access = await accessible_repo_names(session, client)
+    if access is not None:
+        query = query.where(col(ReviewJob.repo_full_name).in_(access))
+    return query
 
 
 async def enqueue_job(
@@ -121,9 +136,7 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
         .limit(1)
         .with_for_update(skip_locked=True)
     )
-    access = await accessible_repo_names(session, client)
-    if access is not None:
-        query = query.where(col(ReviewJob.repo_full_name).in_(access))
+    query = await _filter_to_access(session, client, query)
 
     result = await session.execute(query)
     job = result.scalar_one_or_none()
@@ -154,9 +167,7 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
         .limit(1)
         .with_for_update(skip_locked=True)
     )
-    access = await accessible_repo_names(session, client)
-    if access is not None:
-        query = query.where(col(ReviewJob.repo_full_name).in_(access))
+    query = await _filter_to_access(session, client, query)
 
     result = await session.execute(query)
     job = result.scalar_one_or_none()
@@ -242,10 +253,6 @@ async def list_jobs(
         query = query.where(col(ReviewJob.state) == filters.state.value)
     if filters.repo_full_name is not None:
         query = query.where(col(ReviewJob.repo_full_name) == filters.repo_full_name)
-    access = await accessible_repo_names(session, client)
-    if access is not None:
-        # ANDs with any repo_full_name filter above: asking for a repo outside
-        # the access set is an ordinary empty result, not a special case.
-        query = query.where(col(ReviewJob.repo_full_name).in_(access))
+    query = await _filter_to_access(session, client, query)
     result = await session.execute(query)
     return list(result.scalars().all())

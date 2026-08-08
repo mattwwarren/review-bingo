@@ -294,12 +294,12 @@ async def test_policy_write_denied_logs_policy_write_denied(
     assert len(denied) == 1
     record = denied[0]
     assert record.levelno == logging.WARNING
-    assert record.repo_full_name == ADMIN_REPO  # type: ignore[attr-defined]
-    assert record.client_id == enrolled.client_id  # type: ignore[attr-defined]
-    assert record.identity_id == enrolled.identity_id  # type: ignore[attr-defined]
-    assert record.permission == PermissionLevel.WRITE  # type: ignore[attr-defined]
-    assert record.github_login == "marge-bouvier"  # type: ignore[attr-defined]
-    assert record.github_user_id == 20482231  # type: ignore[attr-defined]
+    assert record.__dict__["repo_full_name"] == ADMIN_REPO
+    assert record.__dict__["client_id"] == enrolled.client_id
+    assert record.__dict__["identity_id"] == enrolled.identity_id
+    assert record.__dict__["permission"] == PermissionLevel.WRITE
+    assert record.__dict__["github_login"] == "marge-bouvier"
+    assert record.__dict__["github_user_id"] == 20482231
 
     # The bearer token is the means to retry; identity fields say who, not how.
     token = enrolled.headers["Authorization"].removeprefix("Bearer ")
@@ -329,11 +329,11 @@ async def test_policy_write_authorized_logs_policy_write_authorized(
     assert len(authorized) == 1
     record = authorized[0]
     assert record.levelno == logging.INFO
-    assert record.repo_full_name == ADMIN_REPO  # type: ignore[attr-defined]
-    assert record.client_id == enrolled.client_id  # type: ignore[attr-defined]
-    assert record.identity_id == enrolled.identity_id  # type: ignore[attr-defined]
-    assert record.github_login == "marge-bouvier"  # type: ignore[attr-defined]
-    assert record.github_user_id == 20482231  # type: ignore[attr-defined]
+    assert record.__dict__["repo_full_name"] == ADMIN_REPO
+    assert record.__dict__["client_id"] == enrolled.client_id
+    assert record.__dict__["identity_id"] == enrolled.identity_id
+    assert record.__dict__["github_login"] == "marge-bouvier"
+    assert record.__dict__["github_user_id"] == 20482231
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ async def test_dev_mode_policy_write_logs_the_bypass(
     bypass = records_named(caplog, "policy_write_dev_mode_bypass")
     assert len(bypass) == 1
     assert bypass[0].levelno == logging.WARNING
-    assert bypass[0].repo_full_name == ADMIN_REPO  # type: ignore[attr-defined]
+    assert bypass[0].__dict__["repo_full_name"] == ADMIN_REPO
     assert all(DEV_SECRET not in dump(r) for r in caplog.records)
 
 
@@ -399,7 +399,7 @@ async def test_dev_mode_policy_write_rejects_wrong_secret(
     assert response.status_code == HTTPStatus.UNAUTHORIZED
     denied = records_named(caplog, "enrolment_denied")
     assert len(denied) == 1
-    assert denied[0].reason == "credential_rejected"  # type: ignore[attr-defined]
+    assert denied[0].__dict__["reason"] == "credential_rejected"
 
 
 async def test_dev_mode_policy_write_denies_without_configured_secret(

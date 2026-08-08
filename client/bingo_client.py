@@ -45,6 +45,11 @@ import httpx
 
 DEFAULT_STATE_PATH = Path.home() / ".config" / "review-bingo" / "client.json"
 
+# Sent on the one call made before a token exists (register). The hub's
+# deny-by-default gate checks that an Authorization header is present, not
+# that it is valid, so this is a stand-in until real enrolment exists.
+PENDING_ENROLMENT_AUTH = "Bearer pending-enrolment"
+
 
 def load_state(path: Path) -> dict[str, str]:
     if not path.exists():
@@ -111,7 +116,14 @@ def cmd_register(args: argparse.Namespace) -> None:
         "tier": args.tier,
         "quant": args.quant,
     }
-    response = httpx.post(f"{args.hub.rstrip('/')}/clients", json=payload, timeout=30.0)
+    # No token yet — send the placeholder so the hub's presence gate lets the
+    # registration through (see PENDING_ENROLMENT_AUTH).
+    response = httpx.post(
+        f"{args.hub.rstrip('/')}/clients",
+        json=payload,
+        headers={"Authorization": PENDING_ENROLMENT_AUTH},
+        timeout=30.0,
+    )
     response.raise_for_status()
     body = response.json()
     save_state(args.state, {"hub_url": args.hub.rstrip("/"), "token": body["token"]})

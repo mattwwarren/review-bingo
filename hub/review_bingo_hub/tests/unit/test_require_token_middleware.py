@@ -67,7 +67,7 @@ class TestPublicPaths:
 
     def test_public_paths_contents_is_exact(self) -> None:
         """The allowlist is exactly these four paths - nothing else is public."""
-        assert PUBLIC_PATHS == frozenset({"/health", "/ping", "/webhooks/github", "/dashboard"})
+        assert frozenset({"/health", "/ping", "/webhooks/github", "/dashboard"}) == PUBLIC_PATHS
 
     def test_public_paths_is_immutable(self) -> None:
         """The allowlist is a frozenset so no caller can widen it at runtime."""

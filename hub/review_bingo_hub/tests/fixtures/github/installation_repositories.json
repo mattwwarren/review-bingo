@@ -1,0 +1,75 @@
+{
+  "total_count": 3,
+  "repository_selection": "selected",
+  "repositories": [
+    {
+      "id": 771002001,
+      "node_id": "R_kgDOLcT1kQ",
+      "name": "payments",
+      "full_name": "acme/payments",
+      "private": true,
+      "owner": {
+        "login": "acme",
+        "id": 90210,
+        "type": "Organization"
+      },
+      "default_branch": "main",
+      "archived": false,
+      "disabled": false,
+      "visibility": "private",
+      "permissions": {
+        "admin": true,
+        "maintain": true,
+        "push": true,
+        "triage": true,
+        "pull": true
+      }
+    },
+    {
+      "id": 771002002,
+      "node_id": "R_kgDOLcT1kg",
+      "name": "ledger",
+      "full_name": "acme/ledger",
+      "private": true,
+      "owner": {
+        "login": "acme",
+        "id": 90210,
+        "type": "Organization"
+      },
+      "default_branch": "main",
+      "archived": false,
+      "disabled": false,
+      "visibility": "private",
+      "permissions": {
+        "admin": false,
+        "maintain": true,
+        "push": true,
+        "triage": true,
+        "pull": true
+      }
+    },
+    {
+      "id": 771002003,
+      "node_id": "R_kgDOLcT1kw",
+      "name": "docs",
+      "full_name": "acme/docs",
+      "private": false,
+      "owner": {
+        "login": "acme",
+        "id": 90210,
+        "type": "Organization"
+      },
+      "default_branch": "main",
+      "archived": false,
+      "disabled": false,
+      "visibility": "public",
+      "permissions": {
+        "admin": false,
+        "maintain": false,
+        "push": false,
+        "triage": true,
+        "pull": true
+      }
+    }
+  ]
+}

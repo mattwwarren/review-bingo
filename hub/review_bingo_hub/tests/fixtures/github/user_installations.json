@@ -1,0 +1,51 @@
+{
+  "total_count": 2,
+  "installations": [
+    {
+      "id": 51234567,
+      "app_id": 424242,
+      "app_slug": "review-bingo",
+      "client_id": "Iv23liTESTCLIENTID00",
+      "target_id": 90210,
+      "target_type": "Organization",
+      "account": {
+        "login": "acme",
+        "id": 90210,
+        "type": "Organization"
+      },
+      "repository_selection": "selected",
+      "permissions": {
+        "contents": "read",
+        "metadata": "read",
+        "pull_requests": "write"
+      },
+      "events": ["pull_request"],
+      "created_at": "2026-07-01T09:12:33.000Z",
+      "updated_at": "2026-07-01T09:12:33.000Z",
+      "suspended_at": null,
+      "suspended_by": null
+    },
+    {
+      "id": 60000001,
+      "app_id": 111111,
+      "app_slug": "some-other-app",
+      "client_id": "Iv23liOTHERAPP000000",
+      "target_id": 4242,
+      "target_type": "User",
+      "account": {
+        "login": "marge-bouvier",
+        "id": 20482231,
+        "type": "User"
+      },
+      "repository_selection": "all",
+      "permissions": {
+        "metadata": "read"
+      },
+      "events": [],
+      "created_at": "2025-11-19T22:41:05.000Z",
+      "updated_at": "2025-11-19T22:41:05.000Z",
+      "suspended_at": null,
+      "suspended_by": null
+    }
+  ]
+}

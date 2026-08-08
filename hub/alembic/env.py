@@ -14,7 +14,13 @@ from sqlmodel import SQLModel
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False, against fileConfig's default: alembic.ini
+    # names only root/sqlalchemy/alembic, so the default would mark every
+    # already-imported review_bingo_hub.* logger as disabled. Any process that
+    # runs a migration in-process — the test suite does, before every session —
+    # would then go silent for the rest of its life, and silently: a disabled
+    # logger drops records without raising.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 if config.get_main_option("sqlalchemy.url") in {
     "",

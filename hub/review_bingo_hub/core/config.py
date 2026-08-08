@@ -209,10 +209,28 @@ class Settings(BaseSettings):
         alias="GITHUB_APP_PRIVATE_KEY",
         description="PEM private key for the GitHub App (relay); unset means log-only relay",
     )
+    github_app_client_id: str | None = Field(
+        default=None,
+        alias="GITHUB_APP_CLIENT_ID",
+        description="GitHub App client id (Iv23li...), used by clients for the device flow; not the App ID",
+    )
     github_api_url: str = Field(
         default="https://api.github.com",
         alias="GITHUB_API_URL",
         description="GitHub API base URL (override for GHE)",
+    )
+    client_enrolment_mode: str = Field(
+        default="github",
+        alias="CLIENT_ENROLMENT_MODE",
+        description=(
+            "How POST /clients decides admission: 'github' reads identity and repo access from the "
+            "GitHub user token the caller presents; 'dev' accepts a shared CLIENT_ENROLMENT_SECRET instead"
+        ),
+    )
+    client_enrolment_secret: str | None = Field(
+        default=None,
+        alias="CLIENT_ENROLMENT_SECRET",
+        description="Shared secret accepted as an enrolment credential when CLIENT_ENROLMENT_MODE=dev",
     )
     lease_ttl_seconds: int = Field(
         default=600,
@@ -220,6 +238,33 @@ class Settings(BaseSettings):
         alias="LEASE_TTL_SECONDS",
         description="How long a client holds a review job lease before it is reclaimed",
     )
+
+    @staticmethod
+    def _validate_choice(value: str, allowed: list[str], field_name: str) -> str:
+        """Reject a config value outside its allowed set.
+
+        Shared by every field-level validator that needs this shape, so a
+        typo falls through to a loud `ValueError` at startup instead of
+        silently reaching whichever branch the code happens to treat as the
+        default — the failure mode that matters most for a field like
+        CLIENT_ENROLMENT_MODE, where the silent-default direction is an open
+        registration endpoint.
+
+        Args:
+            value: The configured value to validate
+            allowed: The values considered valid
+            field_name: The env var / field name, for the error message
+
+        Returns:
+            The validated value
+
+        Raises:
+            ValueError: If value is not in allowed
+        """
+        if value not in allowed:
+            error_msg = f"{field_name} '{value}' not allowed. Must be one of: {', '.join(allowed)}"
+            raise ValueError(error_msg)
+        return value
 
     @field_validator("jwt_algorithm")
     @classmethod
@@ -250,10 +295,27 @@ class Settings(BaseSettings):
             "PS384",
             "PS512",  # RSA-PSS
         ]
-        if value not in allowed_algorithms:
-            error_msg = f"JWT algorithm '{value}' not allowed. Must be one of: {', '.join(allowed_algorithms)}"
-            raise ValueError(error_msg)
-        return value
+        return cls._validate_choice(value, allowed_algorithms, "JWT algorithm")
+
+    @field_validator("client_enrolment_mode")
+    @classmethod
+    def validate_client_enrolment_mode(cls, value: str) -> str:
+        """Reject anything that is not a mode we actually implement.
+
+        A typo here would otherwise fall through to whichever branch the code
+        happens to treat as the default, and the failure would be silent in
+        exactly the direction that matters — an open registration endpoint.
+
+        Args:
+            value: Enrolment mode name
+
+        Returns:
+            Validated mode name
+
+        Raises:
+            ValueError: If the mode is not "github" or "dev"
+        """
+        return cls._validate_choice(value, ["github", "dev"], "CLIENT_ENROLMENT_MODE")
 
     @property
     def cors_allowed_origins(self) -> list[str]:
@@ -321,6 +383,28 @@ class Settings(BaseSettings):
             if not self.storage_gcs_project_id:
                 errors.append("STORAGE_GCS_PROJECT_ID required for GCS storage")
 
+    def _validate_enrolment_config(self, errors: list[str], warnings: list[str]) -> None:
+        """Validate grid client enrolment configuration.
+
+        The warning is unconditional for any non-github mode rather than gated
+        on environment=production: a hub reachable by real clients while
+        running dev-mode enrolment is the problem, and it does not announce
+        itself by setting ENVIRONMENT=production first.
+        """
+        if self.client_enrolment_mode == "github":
+            return
+
+        warnings.append(
+            f"CLIENT_ENROLMENT_MODE={self.client_enrolment_mode} - grid clients are admitted by a shared "
+            "secret, NOT by GitHub identity. Anyone holding that secret can join the grid and lease review "
+            "jobs. Use this for local development only."
+        )
+        if not self.client_enrolment_secret:
+            errors.append(
+                f"CLIENT_ENROLMENT_SECRET required when CLIENT_ENROLMENT_MODE={self.client_enrolment_mode} "
+                "(without it there is nothing to compare an enrolment credential against)"
+            )
+
     def _validate_production_config(self, warnings: list[str]) -> None:
         """Validate production environment configuration."""
         if self.environment != "production":
@@ -363,6 +447,7 @@ class Settings(BaseSettings):
 
         self._validate_auth_config(errors, warnings)
         self._validate_storage_config(errors)
+        self._validate_enrolment_config(errors, warnings)
         self._validate_production_config(warnings)
 
         if errors:

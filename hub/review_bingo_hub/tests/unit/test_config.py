@@ -9,6 +9,7 @@ Tests cover:
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -391,3 +392,93 @@ class TestValidateConfig:
 
         # Cognito uses JWKS, so no warning about missing JWT_PUBLIC_KEY
         assert not any("JWT_PUBLIC_KEY" in w for w in warnings)
+
+
+class TestClientEnrolmentConfig:
+    """Tests for the grid client enrolment mode and its GitHub App credentials.
+
+    Settings resolves its `.env` relative to the working directory, so each of
+    these chdirs into an empty tmp_path first: a developer's hub/.env (written
+    by scripts/github-app-setup.sh) must not be able to make them pass or fail.
+    The env var under test is then the only input.
+    """
+
+    def test_client_enrolment_mode_defaults_to_github(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Unset CLIENT_ENROLMENT_MODE means GitHub-derived admission."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CLIENT_ENROLMENT_MODE", raising=False)
+
+        settings = Settings()
+
+        assert settings.client_enrolment_mode == "github"
+
+    def test_client_enrolment_mode_rejects_unknown_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A typo must fail loudly, not silently fall back to an open door."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CLIENT_ENROLMENT_MODE", "wide-open")
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings()
+
+        assert "CLIENT_ENROLMENT_MODE" in str(exc_info.value)
+
+    def test_github_app_client_id_configurable_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """The device flow needs the App's client id, distinct from its app id."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv23liTESTCLIENTID00")
+
+        settings = Settings()
+
+        assert settings.github_app_client_id == "Iv23liTESTCLIENTID00"
+
+    def test_validate_config_warns_when_enrolment_mode_not_github(
+        self,
+        test_settings_factory: Callable[..., Settings],
+    ) -> None:
+        """dev mode is a bypass; startup must say so out loud."""
+        settings = test_settings_factory(
+            client_enrolment_mode="dev",
+            client_enrolment_secret="shared-dev-secret",
+        )
+
+        warnings = settings.validate_config()
+
+        assert any("CLIENT_ENROLMENT_MODE" in w for w in warnings)
+
+    def test_validate_config_silent_when_enrolment_mode_github(
+        self,
+        test_settings_factory: Callable[..., Settings],
+    ) -> None:
+        """The secure default earns no warning noise."""
+        settings = test_settings_factory(client_enrolment_mode="github")
+
+        warnings = settings.validate_config()
+
+        assert not any("CLIENT_ENROLMENT_MODE" in w for w in warnings)
+
+    def test_validate_config_errors_when_dev_mode_has_no_secret(
+        self,
+        test_settings_factory: Callable[..., Settings],
+    ) -> None:
+        """dev mode without a secret would accept any Authorization header at all."""
+        settings = test_settings_factory(
+            client_enrolment_mode="dev",
+            client_enrolment_secret=None,
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            settings.validate_config()
+
+        assert "CLIENT_ENROLMENT_SECRET" in str(exc_info.value)

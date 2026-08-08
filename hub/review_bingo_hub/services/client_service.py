@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,14 +22,21 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def register_client(session: AsyncSession, payload: ReviewClientCreate) -> tuple[ReviewClient, str]:
+async def register_client(
+    session: AsyncSession,
+    payload: ReviewClientCreate,
+    identity_id: UUID | None = None,
+) -> tuple[ReviewClient, str]:
     """Create a client and mint its bearer token.
 
     Returns the client and the plaintext token — the only time it exists
     outside the caller's hands. Only the SHA-256 digest is stored.
+
+    `identity_id` is the GitHub account admission was derived from, already
+    resolved by identity_service; None under dev-mode enrolment.
     """
     token = secrets.token_urlsafe(32)
-    client = ReviewClient(**payload.model_dump(), token_hash=hash_token(token))
+    client = ReviewClient(**payload.model_dump(), token_hash=hash_token(token), identity_id=identity_id)
     session.add(client)
     await session.flush()  # type: ignore[attr-defined]
     await session.refresh(client)

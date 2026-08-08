@@ -69,6 +69,12 @@ DOCKER_PAUSE_SECONDS = 0.5
 # token must still supply one explicitly.
 PLACEHOLDER_AUTH_HEADER = "Bearer test-fixture-placeholder"
 
+# The same string minus the scheme. The suite runs with CLIENT_ENROLMENT_MODE=dev
+# and this as CLIENT_ENROLMENT_SECRET, so the header every client fixture already
+# sends is also a valid enrolment credential — POST /clients keeps working in the
+# dozens of tests that only care about what happens after registration.
+PLACEHOLDER_ENROLMENT_SECRET = PLACEHOLDER_AUTH_HEADER.removeprefix("Bearer ")
+
 
 # =============================================================================
 # pytest-xdist Docker Coordination
@@ -802,10 +808,17 @@ def isolate_github_app_config(monkeypatch: pytest.MonkeyPatch) -> None:
     otherwise switch webhook signature verification and App-mode relay on for
     every test — unsigned webhook fixtures start returning 401 and the relay
     tries to reach api.github.com. Tests that want either must opt in.
+
+    Client enrolment is pinned to dev mode for the same reason, plus one more:
+    github mode would send every POST /clients in the suite to api.github.com.
+    Tests that exercise github-mode enrolment opt back in explicitly.
     """
     monkeypatch.setattr(settings, "github_webhook_secret", None)
     monkeypatch.setattr(settings, "github_app_id", None)
     monkeypatch.setattr(settings, "github_app_private_key", None)
+    monkeypatch.setattr(settings, "github_app_client_id", None)
+    monkeypatch.setattr(settings, "client_enrolment_mode", "dev")
+    monkeypatch.setattr(settings, "client_enrolment_secret", PLACEHOLDER_ENROLMENT_SECRET)
 
 
 @pytest.fixture(autouse=True)

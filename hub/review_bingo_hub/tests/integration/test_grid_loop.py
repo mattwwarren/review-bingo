@@ -323,6 +323,43 @@ async def test_targeted_lease_still_enforces_the_policy_floor(client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_tier_floor_demo_scenario_blocks_experimental_admits_frontier(client: AsyncClient) -> None:
+    """Pins the exact scenario scripts/demo-tiers.sh walks, as a durable CI assertion.
+
+    A floor above experimental: an experimental client sees a dry queue and is
+    refused the job by name, while a frontier client leases that very job
+    through both /jobs/lease and the targeted endpoint.
+    """
+    repo = "acme/tier-demo"
+    response = await client.put(f"/policies/{repo}", json={"min_tier": "standard"})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["min_tier"] == "standard"
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="tier-demo-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    # Experimental client: queue looks dry, and naming the job directly is a 403, not a 404.
+    _, low_headers = await register_and_check_in(client, "tier-demo-toy-box", "experimental")
+    response = await client.post("/jobs/lease", headers=low_headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() is None
+
+    response = await client.post(f"/jobs/{job_id}/lease", headers=low_headers)
+    assert response.status_code == HTTPStatus.FORBIDDEN
+
+    # Frontier client clears the floor and leases the same job the experimental client was refused.
+    _, high_headers = await register_and_check_in(client, "tier-demo-big-rig", "frontier")
+    response = await client.post("/jobs/lease", headers=high_headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
 async def test_targeted_lease_rejects_a_job_someone_else_holds(client: AsyncClient) -> None:
     response = await client.post("/webhooks/github", json=pr_payload(sha="held-target"), headers=PR_WEBHOOK_HEADERS)
     job_id = response.json()["job_id"]

@@ -45,13 +45,15 @@ REASON_GITHUB_UNREACHABLE = "github_unreachable"
 DETAIL_CREDENTIAL_REJECTED = "Enrolment credential rejected"
 
 
-class EnrolmentDeniedError(Exception):
-    """The credential was explicitly rejected — not a transient condition.
+class EnrolmentError(Exception):
+    """An enrolment attempt could not be admitted.
 
     A domain exception rather than an HTTPException: this module is called by
     A2 (check-in re-attestation), A3 (dispatch filtering), and A4 (policy)
     too, none of which are guaranteed to want POST /clients' own 401/503
     HTTP mapping. The API layer translates this at the boundary instead.
+    Shared base so a caller that only wants "did enrolment fail" can catch
+    one type, mirroring GithubIdentityError/GithubUnavailableError.
     """
 
     def __init__(self, reason: str, detail: str) -> None:
@@ -60,13 +62,12 @@ class EnrolmentDeniedError(Exception):
         super().__init__(detail)
 
 
-class EnrolmentUnavailableError(Exception):
-    """GitHub could not be reached — a transient condition, worth a retry."""
+class EnrolmentDeniedError(EnrolmentError):
+    """The credential was explicitly rejected — not a transient condition."""
 
-    def __init__(self, reason: str, detail: str) -> None:
-        self.reason = reason
-        self.detail = detail
-        super().__init__(detail)
+
+class EnrolmentUnavailableError(EnrolmentError):
+    """GitHub could not be reached — a transient condition, worth a retry."""
 
 
 async def get_or_create_identity(

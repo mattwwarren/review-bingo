@@ -169,6 +169,7 @@ async def test_enrolment_accepted_logs_identity_resolved(
     for record in caplog.records:
         assert GITHUB_TOKEN not in dump(record)
         assert GITHUB_TOKEN[:8] not in dump(record)
+        assert GITHUB_TOKEN[-8:] not in dump(record)
 
 
 async def test_enrolment_denied_with_invalid_github_token(
@@ -221,7 +222,9 @@ async def test_enrolment_fails_closed_when_github_unavailable(
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
     denied = records_named(caplog, "enrolment_denied")
     assert len(denied) == 1
+    assert denied[0].levelno == logging.WARNING
     assert denied[0].reason == "github_unreachable"  # type: ignore[attr-defined]
+    assert GITHUB_TOKEN not in dump(denied[0])
 
     # Fail closed: an unreachable GitHub must not mint a client.
     assert (await session.execute(select(ReviewClient))).scalars().all() == []

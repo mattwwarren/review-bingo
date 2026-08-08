@@ -107,6 +107,7 @@ async def test_get_identity_logs_no_token_material(
         assert FAKE_TOKEN not in rendered
         # Not even a "harmless" fragment: a prefix narrows the search space.
         assert FAKE_TOKEN[:8] not in rendered
+        assert FAKE_TOKEN[-8:] not in rendered
 
 
 def _repo(full_name: str, **permissions: bool) -> dict[str, Any]:

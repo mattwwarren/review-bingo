@@ -18,8 +18,17 @@ HUB_LOG="$(mktemp -t bingo-demo-hub.XXXXXX.log)"
 # The hub denies by default: every path outside /health, /ping,
 # /webhooks/github and /dashboard needs an Authorization header present. The
 # gate checks presence, not validity, so this placeholder is enough for the
-# demo until real enrolment tokens exist.
+# demo's read-only curls.
 AUTH_HEADER='Authorization: Bearer pending-enrolment'
+
+# Joining the grid is a different question, and in the real world it is
+# answered by GitHub: the client completes a device flow and hands the hub the
+# resulting user token. The demo has to run offline with no GitHub App, so it
+# starts the hub in dev enrolment mode, where a shared secret stands in. The
+# hub logs a warning at startup and on every enrolment; that noise is the
+# point — it is what makes the bypass auditable rather than invisible.
+export CLIENT_ENROLMENT_MODE=dev
+export CLIENT_ENROLMENT_SECRET=demo-enrolment-secret
 
 cleanup() {
   # uv run wraps uvicorn in a child process, so kill by exact command line —
@@ -69,7 +78,8 @@ curl -sf -X POST "localhost:$HUB_PORT/webhooks/github" \
 say "Client joins the grid (marge-mac-mini, standard tier) and checks in"
 uv run client/bingo_client.py register --state "$STATE_FILE" \
   --hub "http://localhost:$HUB_PORT" --name marge-mac-mini \
-  --model qwen2.5-coder-32b --provider ollama --quant q4_K_M --tier standard
+  --model qwen2.5-coder-32b --provider ollama --quant q4_K_M --tier standard \
+  --enrolment-token "$CLIENT_ENROLMENT_SECRET"
 uv run client/bingo_client.py check-in --state "$STATE_FILE"
 
 say "One round: lease -> review (canned; set REVIEW_CMD to bring your own) -> report"

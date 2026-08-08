@@ -102,15 +102,15 @@ class TestGatedPathsOnRealApp:
     ) -> None:
         """The gate is presence-only: an unvalidated placeholder gets through.
 
-        `/policies`, not `/jobs`: A3 gave `/jobs` endpoint-level auth (ClientDep),
-        so a placeholder now clears the gate and is then rejected at the
-        endpoint — a 401 that says nothing about the middleware. `/policies` is
-        still middleware-only-gated, so it isolates the property under test.
-        A4 (#23) is what eventually adds endpoint-level auth there too, and this
-        test will need a new example path again when it does.
+        `/docs`, not `/jobs` or `/policies`: A3 gave `/jobs` endpoint-level auth
+        (ClientDep) and A4 (#23) has now done the same for `/policies`, so on
+        either of those a placeholder clears the gate and is then rejected at
+        the endpoint — a 401 that says nothing about the middleware. `/docs` is
+        a framework route with no endpoint-level auth to add, so it isolates the
+        property under test and cannot be overtaken by a later auth ticket.
         """
         response = await client_no_default_headers.get(
-            "/policies",
+            "/docs",
             headers={"Authorization": PLACEHOLDER_AUTH},
         )
 

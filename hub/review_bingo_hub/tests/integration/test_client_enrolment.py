@@ -39,8 +39,10 @@ from review_bingo_hub.services.github_identity_service import (
 from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
     FakeGithubIdentityService,
+    dump,
     enrolment_headers,
     marge,
+    records_named,
     use_github_mode,
 )
 
@@ -52,14 +54,6 @@ REGISTRATION_PAYLOAD = {
     "provider": "ollama",
     "tier": "standard",
 }
-
-
-def records_named(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
-    return [r for r in caplog.records if r.getMessage() == event]
-
-
-def dump(record: logging.LogRecord) -> str:
-    return record.getMessage() + repr(record.__dict__)
 
 
 async def test_enrolment_accepted_populates_identity_and_access_set(

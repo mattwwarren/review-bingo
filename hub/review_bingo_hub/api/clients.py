@@ -32,6 +32,7 @@ from review_bingo_hub.services.client_service import (
 )
 from review_bingo_hub.services.github_identity_service import GithubIdentityServiceDep
 from review_bingo_hub.services.identity_service import (
+    DETAIL_UNKNOWN_CALLER,
     EnrolmentDeniedError,
     EnrolmentUnavailableError,
     resolve_enrolment_credential,
@@ -51,7 +52,7 @@ async def get_current_client(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Client token required")
     client = await get_client_by_token(session, credentials.credentials)
     if client is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unknown client token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=DETAIL_UNKNOWN_CALLER)
     return client
 
 

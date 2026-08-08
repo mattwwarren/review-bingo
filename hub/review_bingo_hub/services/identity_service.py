@@ -29,7 +29,7 @@ from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.core.logging import get_logging_context
-from review_bingo_hub.models.github_identity import GithubIdentity, IdentityRepoAccess
+from review_bingo_hub.models.github_identity import GithubIdentity, IdentityRepoAccess, PermissionLevel
 from review_bingo_hub.models.review_client import ReviewClient
 from review_bingo_hub.services.github_identity_service import (
     GithubIdentityError,
@@ -69,6 +69,46 @@ class EnrolmentDeniedError(EnrolmentError):
 
 class EnrolmentUnavailableError(EnrolmentError):
     """GitHub could not be reached — a transient condition, worth a retry."""
+
+
+class PolicyAuthorizationError(Exception):
+    """A policy read or write could not be authorized for this caller.
+
+    A domain exception rather than an HTTPException, same reasoning as
+    EnrolmentError: this module has no HTTP layer of its own, so api/policies.py
+    maps these at the boundary.
+    """
+
+    def __init__(self, *, reason: str, detail: str) -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(detail)
+
+
+class PolicyCallerUnauthenticatedError(PolicyAuthorizationError):
+    """The bearer credential does not resolve to any known caller (maps to 401)."""
+
+
+class PolicyWriteForbiddenError(PolicyAuthorizationError):
+    """The caller is known but does not administer this repo (maps to 403)."""
+
+
+# Named ..._UNKNOWN_CALLER rather than ..._UNKNOWN_TOKEN because flake8-bandit
+# reads any constant whose *name* contains "token" as a hardcoded credential.
+# The values are what they say: the caller could not be resolved.
+REASON_UNKNOWN_CALLER = "unknown_token"
+REASON_NOT_ADMIN = "not_admin"
+
+# The dev-mode bypass has no ReviewClient to name — no client is registered at
+# all for a raw shared-secret write. This sentinel makes that absence explicit
+# in the log record rather than leaving the caller-identity fields silently
+# missing, which would read as an omission bug rather than a deliberate one.
+CALLER_IDENTITY_UNAVAILABLE_DEV_MODE = "unavailable_dev_mode_shared_secret"
+
+# api/clients.py's get_current_client imports this rather than repeating the
+# literal, so the two entry points cannot be told apart by their refusal text.
+DETAIL_UNKNOWN_CALLER = "Unknown client token"
+DETAIL_NOT_ADMIN = "Repo admin access required to set this repo's policy"
 
 
 async def get_or_create_identity(
@@ -132,6 +172,119 @@ async def accessible_repo_names(session: AsyncSession, client: ReviewClient) -> 
         select(IdentityRepoAccess.repo_full_name).where(col(IdentityRepoAccess.identity_id) == client.identity_id)
     )
     return frozenset(result.scalars().all())
+
+
+async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
+    """The grid client behind a bearer credential, or a 401-shaped refusal."""
+    # Deferred, not top-level: client_service.py already imports
+    # accessible_repo_names from this module (#22, job/roster access scoping),
+    # so a top-level import here in the reverse direction is circular whichever
+    # module loads first. Importing at call time breaks the cycle at no runtime
+    # cost — both modules have finished loading long before this runs.
+    from review_bingo_hub.services.client_service import get_client_by_token  # noqa: PLC0415
+
+    client = await get_client_by_token(session, credential)
+    if client is None:
+        raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
+    return client
+
+
+async def _repo_permission(session: AsyncSession, identity_id: UUID, repo_full_name: str) -> PermissionLevel | None:
+    """What GitHub last said this identity could do on one repo, if anything.
+
+    A different question from accessible_repo_names, which answers "which
+    repos" rather than "at what level" — hence a second, narrower query rather
+    than a filter over that function's result.
+    """
+    result = await session.execute(
+        select(IdentityRepoAccess.permission).where(
+            col(IdentityRepoAccess.identity_id) == identity_id,
+            col(IdentityRepoAccess.repo_full_name) == repo_full_name,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _github_identity_fields(session: AsyncSession, identity_id: UUID | None) -> dict[str, str | int | None]:
+    """github_login/github_user_id for an audit record, or both None.
+
+    Required fields rather than optional extras, following identity_resolved's
+    precedent: client_id and identity_id are opaque UUIDs, so "which human
+    tried this" has to be answerable from the log stream on its own.
+    """
+    if identity_id is None:
+        return {"github_login": None, "github_user_id": None}
+    result = await session.execute(
+        select(GithubIdentity.github_login, GithubIdentity.github_user_id).where(col(GithubIdentity.id) == identity_id)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return {"github_login": None, "github_user_id": None}
+    return {"github_login": row[0], "github_user_id": row[1]}
+
+
+async def authorize_policy_write(session: AsyncSession, credential: str, repo_full_name: str) -> None:
+    """Admit or refuse a PUT /policies/{owner}/{repo} call.
+
+    dev mode: the shared enrolment secret substitutes for the repo-admin check
+    — the same comparison POST /clients makes (_resolve_dev_credential, in this
+    module), not a parallel one, so there is one named bypass rather than two.
+
+    github mode: the caller's hub-minted token must resolve to a client whose
+    cached GitHub identity is recorded as `admin` on this repo. A client with
+    no identity at all fails closed, exactly as it does for dispatch.
+
+    Raises:
+        PolicyCallerUnauthenticatedError: credential resolves to nobody (401).
+        PolicyWriteForbiddenError: caller is known but not a repo admin (403).
+        EnrolmentDeniedError: dev-mode secret rejected (401).
+    """
+    if settings.client_enrolment_mode == "dev":
+        _resolve_dev_credential(credential)
+        LOGGER.warning(
+            "policy_write_dev_mode_bypass",
+            extra={
+                **get_logging_context(),
+                "repo_full_name": repo_full_name,
+                "caller_identity": CALLER_IDENTITY_UNAVAILABLE_DEV_MODE,
+            },
+        )
+        return
+
+    client = await _resolve_caller_client(session, credential)
+    permission = (
+        await _repo_permission(session, client.identity_id, repo_full_name) if client.identity_id is not None else None
+    )
+    log_extra = {
+        **get_logging_context(),
+        "repo_full_name": repo_full_name,
+        "client_id": str(client.id),
+        "identity_id": str(client.identity_id) if client.identity_id else None,
+        **(await _github_identity_fields(session, client.identity_id)),
+    }
+    if permission != PermissionLevel.ADMIN:
+        LOGGER.warning("policy_write_denied", extra={**log_extra, "permission": permission})
+        raise PolicyWriteForbiddenError(reason=REASON_NOT_ADMIN, detail=DETAIL_NOT_ADMIN)
+    LOGGER.info("policy_write_authorized", extra=log_extra)
+
+
+async def caller_accessible_repo_names(session: AsyncSession, credential: str) -> frozenset[str] | None:
+    """Repos this credential's caller may see, or None for "no filtering" (dev mode).
+
+    Not a second accessible_repo_names: that function already owns the "what
+    can this caller reach" answer for dispatch, job reads, and the roster. This
+    one only adds the credential half in front of it — resolve the bearer token
+    to a ReviewClient, then delegate — so policy reads cannot drift into a
+    fourth answer.
+
+    An unknown token still raises. Read scoping is permissive by design, but
+    never open to a credential that resolves to nobody.
+    """
+    if settings.client_enrolment_mode == "dev":
+        _resolve_dev_credential(credential)
+        return None
+    client = await _resolve_caller_client(session, credential)
+    return await accessible_repo_names(session, client)
 
 
 def _denied(

@@ -233,7 +233,7 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
         PolicyWriteForbiddenError: caller is known but not a repo admin (403).
         EnrolmentDeniedError: dev-mode secret rejected (401).
     """
-    if settings.client_enrolment_mode != "github":
+    if settings.client_enrolment_mode == "dev":
         _resolve_dev_credential(credential)
         LOGGER.warning(
             "policy_write_dev_mode_bypass",
@@ -272,7 +272,7 @@ async def caller_accessible_repo_names(session: AsyncSession, credential: str) -
     An unknown token still raises. Read scoping is permissive by design, but
     never open to a credential that resolves to nobody.
     """
-    if settings.client_enrolment_mode != "github":
+    if settings.client_enrolment_mode == "dev":
         _resolve_dev_credential(credential)
         return None
     client = await _resolve_caller_client(session, credential)

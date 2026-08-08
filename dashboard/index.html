@@ -69,6 +69,12 @@
     background: var(--dauber);
     animation: none;
   }
+  /* Quiet, not alarming: nothing is broken, we are just not logged in yet.
+     Needed explicitly — [data-live="false"] matches only the literal "false". */
+  .pulse[data-live="unauthorized"]::before {
+    background: var(--dim);
+    animation: none;
+  }
   @keyframes ping {
     70%  { box-shadow: 0 0 0 7px rgba(255, 194, 75, 0); }
     100% { box-shadow: 0 0 0 0 rgba(255, 194, 75, 0); }
@@ -321,10 +327,24 @@
 
   async function poll() {
     try {
-      const [jobs, clients] = await Promise.all([
-        fetch(`${HUB}/jobs`, { headers: { Authorization: AUTH_HEADER } }).then((r) => r.json()),
-        fetch(`${HUB}/clients`, { headers: { Authorization: AUTH_HEADER } }).then((r) => r.json()),
+      const [jobsRes, clientsRes] = await Promise.all([
+        fetch(`${HUB}/jobs`, { headers: { Authorization: AUTH_HEADER } }),
+        fetch(`${HUB}/clients`, { headers: { Authorization: AUTH_HEADER } }),
       ]);
+
+      // Check the status before parsing. A 401 body parses perfectly well, and
+      // an object arriving where an array belongs would fail somewhere in
+      // rendering — reported as "hub unreachable", which it plainly is not.
+      if ([jobsRes.status, clientsRes.status].some((s) => s === 401 || s === 403)) {
+        setHealth("unauthorized");
+        return;
+      }
+      if (!jobsRes.ok || !clientsRes.ok) {
+        setHealth(false);
+        return;
+      }
+
+      const [jobs, clients] = await Promise.all([jobsRes.json(), clientsRes.json()]);
       setHealth(true);
       latestJobs = jobs;
       renderCard(jobs);
@@ -343,9 +363,16 @@
     }
   }
 
-  function setHealth(live) {
-    el.health.dataset.live = String(live);
-    el.health.textContent = live ? "hub live" : "hub unreachable";
+  // Three states, not two: a hub that is up but rejecting us is a different
+  // fact from a hub that is down, and pointing an operator at the network when
+  // the answer is "log in" costs real debugging time.
+  function setHealth(state) {
+    const mode = state === "unauthorized" ? "unauthorized" : state ? "true" : "false";
+    el.health.dataset.live = mode;
+    el.health.textContent =
+      mode === "true" ? "hub live" :
+      mode === "unauthorized" ? "hub live — dashboard not authorized yet (#24)" :
+      "hub unreachable";
   }
 
   function renderTally(jobs, clients) {

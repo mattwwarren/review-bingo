@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from review_bingo_hub.api import (
+    auth,
     clients,
     dashboard,
     health,
@@ -20,6 +21,7 @@ router.include_router(users.router)
 
 # review-bingo grid
 router.include_router(webhooks.router)
+router.include_router(auth.router)
 router.include_router(clients.router)
 router.include_router(jobs.router)
 router.include_router(policies.router)

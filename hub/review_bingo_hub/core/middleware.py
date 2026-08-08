@@ -30,7 +30,16 @@ ERROR_STATUS_CODE_THRESHOLD = 400
 # can be widened from a .env file is an allowlist an operator can widen by
 # accident, and "which paths are open" is a property of the service's design,
 # not of a deployment.
-PUBLIC_PATHS: frozenset[str] = frozenset({"/health", "/ping", "/webhooks/github", "/dashboard"})
+PUBLIC_PATHS: frozenset[str] = frozenset(
+    {
+        "/health",
+        "/ping",
+        "/webhooks/github",
+        "/dashboard",
+        "/auth/device/start",
+        "/auth/device/poll",
+    }
+)
 
 
 class RequestSizeValidationMiddleware(BaseHTTPMiddleware):
@@ -209,8 +218,9 @@ class RequireTokenMiddleware(BaseHTTPMiddleware):
         This middleware does not validate anything. It never answers "is this
         token real" - only "is there something to check". Per-route validity
         stays exactly where it already lives: ClientDep/get_current_client for
-        client tokens, verify_signature for webhook HMAC. A future device-flow
-        ticket slots real validation into that layer, not this one.
+        client tokens, ScopedCallerDep for reads a dashboard session may also
+        make, verify_signature for webhook HMAC. B1 (#24) slotted the device
+        flow's real validation into that layer, not this one.
 
     Configuration:
         None. PUBLIC_PATHS is a fixed constant, not a setting.
@@ -232,6 +242,11 @@ class RequireTokenMiddleware(BaseHTTPMiddleware):
         - "/webhooks/github" is public here because it authenticates by HMAC
           signature inside the handler, not by a bearer token. Removing it
           from the allowlist would break GitHub delivery, not harden it.
+        - "/auth/device/start" and "/auth/device/poll" are public because they
+          are how a caller *obtains* a credential: gating them on one would make
+          signing in possible only for someone already signed in. They mint
+          nothing on their own - authorization comes from GitHub, and a poll
+          writes a session only once GitHub says the person authorized it.
         - OPTIONS is always allowed through: CORS preflight carries no
           Authorization header by specification, so gating it would break
           every cross-origin call before the real request was ever made.

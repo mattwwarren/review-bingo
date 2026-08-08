@@ -1,0 +1,12 @@
+# client/ owns its tooling (pyproject.toml), so it owns its artefacts too —
+# mirroring hub/.gitignore. The cache dirs below self-ignore (each tool drops
+# a `.gitignore` containing `*` inside), but they are listed explicitly so the
+# ignore set stays readable without inspecting the caches.
+__pycache__/
+*.pyc
+
+.venv/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

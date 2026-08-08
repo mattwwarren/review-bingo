@@ -24,9 +24,36 @@ from review_bingo_hub.models.review_job import (
     ReviewJobFilters,
     ReviewJobReport,
 )
-from review_bingo_hub.services.identity_service import accessible_repo_names
+from review_bingo_hub.services.identity_service import accessible_repo_names, identity_access_is_stale
 
 ACTIVE_STATES = (JobState.QUEUED, JobState.LEASED)
+
+DETAIL_STALE_ACCESS = "Cached GitHub access has expired; check in again"
+
+
+class StaleIdentityAccessError(Exception):
+    """The caller's cached GitHub access is past its TTL; it must re-attest first.
+
+    A domain exception defined next to its raise sites rather than in
+    `identity_service`, matching the convention that module's own
+    EnrolmentError/PolicyAuthorizationError families follow: the staleness
+    *rule* lives there, but refusing a lease over it is this module's decision,
+    and `api/jobs.py` maps it to a status code at the boundary.
+    """
+
+    def __init__(self, detail: str = DETAIL_STALE_ACCESS) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
+async def _refuse_if_access_stale(session: AsyncSession, client: ReviewClient) -> None:
+    """Guard both lease paths, so naming a job cannot dodge the TTL.
+
+    A single helper for the same reason `_filter_to_access` is one: two copies
+    of a two-line authorization check are two places for it to be forgotten.
+    """
+    if await identity_access_is_stale(session, client):
+        raise StaleIdentityAccessError
 
 
 async def _filter_to_access(session: AsyncSession, client: ReviewClient, query: Select) -> Select:
@@ -117,15 +144,22 @@ async def reclaim_expired_leases(session: AsyncSession) -> int:
 async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJob | None:
     """Hand the oldest eligible queued job to a client.
 
-    Eligibility is two independent gates. The policy floor: the job's min_tier
-    must be at or below the client's declared tier. And access: the job's repo
-    must be one the client's GitHub account can reach. Both are resolved here
-    rather than passed in, so no caller can hand this function a wider scope
-    than the client actually has.
+    Eligibility is three independent gates. The policy floor: the job's min_tier
+    must be at or below the client's declared tier. Access: the job's repo must
+    be one the client's GitHub account can reach. And freshness: that access
+    snapshot must not be older than its TTL. All three are resolved here rather
+    than passed in, so no caller can hand this function a wider scope than the
+    client actually has.
 
     FOR UPDATE SKIP LOCKED keeps concurrent leases from colliding.
+
+    Raises:
+        StaleIdentityAccessError: the access snapshot is past its TTL. Distinct
+            from returning None, which means "nothing to give you": the caller
+            has to be able to say "check in again" rather than "queue is dry".
     """
     await reclaim_expired_leases(session)
+    await _refuse_if_access_stale(session, client)
 
     eligible_tiers = [t.value for t in tiers_at_or_below(client.tier)]
     query = (
@@ -152,11 +186,15 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
     Backs "pick this one" flows (dashboard selection, MCP clients) where the
     caller already knows which job it wants. The eligibility rules are the
     same as `lease_next_job` — naming a job is not a way around a repo's model
-    floor, nor around its access set — and the state check lives inside the
-    locking SELECT so two callers racing for the same job resolve to exactly
-    one winner.
+    floor, nor around its access set, nor around that set's TTL — and the state
+    check lives inside the locking SELECT so two callers racing for the same job
+    resolve to exactly one winner.
+
+    Raises:
+        StaleIdentityAccessError: the access snapshot is past its TTL.
     """
     await reclaim_expired_leases(session)
+    await _refuse_if_access_stale(session, client)
 
     eligible_tiers = [t.value for t in tiers_at_or_below(client.tier)]
     query = (

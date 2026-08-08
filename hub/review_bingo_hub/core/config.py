@@ -238,6 +238,16 @@ class Settings(BaseSettings):
         alias="LEASE_TTL_SECONDS",
         description="How long a client holds a review job lease before it is reclaimed",
     )
+    identity_access_ttl_seconds: int = Field(
+        default=8 * 60 * 60,
+        ge=60,
+        alias="IDENTITY_ACCESS_TTL_SECONDS",
+        description=(
+            "How old a client's cached GitHub repo access may be before leasing is refused until it "
+            "re-attests at check-in. Defaults to 8h, matching a GitHub user token's own lifetime so "
+            "the snapshot and the credential that could refresh it expire together"
+        ),
+    )
 
     @staticmethod
     def _validate_choice(value: str, allowed: list[str], field_name: str) -> str:

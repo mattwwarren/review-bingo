@@ -525,7 +525,10 @@ async def test_check_in_with_token_for_a_different_account_is_rejected(
     fake = FakeGithubIdentityService()
     use_github_mode(monkeypatch, fake)
     headers = await enrol(client, fake, [PAYMENTS])
-    identity_before = await sole_identity(session)
+    # A plain UUID, not the ORM object: the assertions below re-read through
+    # `expire_all()`, and an expired instance would try to lazy-load its own
+    # columns from a synchronous attribute access.
+    identity_id_before = (await sole_identity(session)).id
 
     fake.identity = marge(login="homer-simpson", user_id=99991111)
     fake.repo_access = [readable(LEDGER)]
@@ -539,11 +542,11 @@ async def test_check_in_with_token_for_a_different_account_is_rejected(
     # No second identity minted, no relink, and the other account's repo never
     # reaches the snapshot.
     identities = (await session.execute(select(GithubIdentity))).scalars().all()
-    assert [row.id for row in identities] == [identity_before.id]
+    assert [row.id for row in identities] == [identity_id_before]
     assert await access_snapshot(session) == {(PAYMENTS, PermissionLevel.READ)}
     session.expire_all()
     review_client = (await session.execute(select(ReviewClient))).scalar_one()
-    assert review_client.identity_id == identity_before.id
+    assert review_client.identity_id == identity_id_before
 
 
 async def test_check_in_survives_a_github_outage(
@@ -622,7 +625,6 @@ async def test_check_in_reattestation_never_persists_or_logs_the_fresh_token(
         assert GITHUB_TOKEN[:8] not in dump(record)
         assert GITHUB_TOKEN[-8:] not in dump(record)
 
-    session.expire_all()
     identity = await sole_identity(session)
     access = (await session.execute(select(IdentityRepoAccess))).scalars().all()
     review_client = (await session.execute(select(ReviewClient))).scalar_one()

@@ -25,6 +25,7 @@ from review_bingo_hub.models.review_job import (
 )
 from review_bingo_hub.services.client_service import touch_client
 from review_bingo_hub.services.job_service import (
+    StaleIdentityAccessError,
     get_job,
     get_job_for_client,
     lease_next_job,
@@ -43,12 +44,19 @@ async def lease_job_endpoint(session: SessionDep, client: ClientDep) -> ReviewJo
 
     Requires the client to be checked in — checking in is the grid's
     availability signal, and leasing while checked out would defeat it.
+
+    Cached GitHub access past its TTL is refused with the same 409, deliberately:
+    "check in again" is the same *kind* of answer as "check in first", and a
+    client that already handles one needs no new branch for the other.
     """
     if client.status != ClientStatus.CHECKED_IN:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Check in before leasing")
 
     await touch_client(session, client)
-    job = await lease_next_job(session, client)
+    try:
+        job = await lease_next_job(session, client)
+    except StaleIdentityAccessError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     await session.commit()
 
     if job is None:
@@ -86,7 +94,13 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
         )
 
     await touch_client(session, client)
-    leased = await lease_specific_job(session, client, job_id)
+    try:
+        leased = await lease_specific_job(session, client, job_id)
+    except StaleIdentityAccessError as exc:
+        # 409 rather than the 404 an out-of-access job gets: the caller can
+        # already see this repo, so there is no existence left to protect — only
+        # a refresh to ask for.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
     await session.commit()
 
     if leased is None:

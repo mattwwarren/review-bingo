@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -36,14 +36,18 @@ from review_bingo_hub.services.github_identity_service import (
     GithubIdentityService,
     GithubRepoAccess,
     GithubUnavailableError,
+    GithubUserIdentity,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 REASON_CREDENTIAL_REJECTED = "credential_rejected"
 REASON_GITHUB_UNREACHABLE = "github_unreachable"
+REASON_IDENTITY_MISMATCH = "identity_mismatch"
 
 DETAIL_CREDENTIAL_REJECTED = "Enrolment credential rejected"
+DETAIL_GITHUB_UNREACHABLE = "Could not verify enrolment with GitHub; try again shortly"
+DETAIL_IDENTITY_MISMATCH = "GitHub token does not match this client's linked account"
 
 
 class EnrolmentError(Exception):
@@ -172,6 +176,39 @@ async def accessible_repo_names(session: AsyncSession, client: ReviewClient) -> 
         select(IdentityRepoAccess.repo_full_name).where(col(IdentityRepoAccess.identity_id) == client.identity_id)
     )
     return frozenset(result.scalars().all())
+
+
+async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) -> bool:
+    """Whether this client's cached GitHub access is too old to lease against.
+
+    `accessible_repo_names` answers *which* repos; this answers how old an
+    answer the hub will still act on. Both gates exist because they fail
+    differently: a wrong access set is wrong about the repos, a stale one was
+    right when it was written and nothing has told the hub otherwise since.
+    Nobody notifies a webhook when a person loses repo access, so age is the
+    only signal available.
+
+    The same two inert carve-outs as `accessible_repo_names`, for the same
+    reasons. Dev mode has no GitHub account behind a client, so there is no
+    snapshot to age. And a github-mode client with no identity already fails
+    closed on access — its set is empty and it leases nothing — so calling it
+    stale would answer "check in again" to something a check-in cannot fix.
+
+    A missing identity row reads as maximally stale rather than fresh: the FK
+    makes it unreachable in practice, and the direction to guess in when an
+    authorization snapshot cannot be found is "refuse".
+    """
+    if settings.client_enrolment_mode != "github":
+        return False
+    if client.identity_id is None:
+        return False
+    result = await session.execute(
+        select(GithubIdentity.access_refreshed_at).where(col(GithubIdentity.id) == client.identity_id)
+    )
+    refreshed_at = result.scalar_one_or_none()
+    if refreshed_at is None:
+        return True
+    return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
 
 
 async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
@@ -310,6 +347,113 @@ def _resolve_dev_credential(credential: str) -> None:
     LOGGER.warning("dev_mode_secret_used", extra={**get_logging_context()})
 
 
+async def _read_github_identity(
+    github: GithubIdentityService,
+    credential: str,
+) -> tuple[GithubUserIdentity, list[GithubRepoAccess]]:
+    """Spend a GitHub token once: who it belongs to, and what it can reach.
+
+    Shared by enrolment and check-in re-attestation so the two cannot drift into
+    different exception mappings for the same pair of calls. That mapping is not
+    a detail: whether GitHub's answer means "rejected" or "unreachable" decides
+    whether the caller fails closed or is let through on its existing snapshot,
+    and one place has to own that distinction.
+
+    Raises:
+        EnrolmentDeniedError: GitHub rejected the credential.
+        EnrolmentUnavailableError: GitHub could not be reached.
+    """
+    try:
+        github_identity = await github.get_identity(credential)
+        repo_access = await github.get_repo_access(credential)
+    except GithubUnavailableError as exc:
+        raise _denied(reason=REASON_GITHUB_UNREACHABLE, detail=DETAIL_GITHUB_UNREACHABLE, unavailable=True) from exc
+    except GithubIdentityError as exc:
+        raise _denied(reason=REASON_CREDENTIAL_REJECTED, detail=DETAIL_CREDENTIAL_REJECTED) from exc
+    return github_identity, repo_access
+
+
+async def _linked_github_user_id(session: AsyncSession, identity_id: UUID) -> int | None:
+    """The GitHub account number a client is already linked to, if the row is there.
+
+    A narrow query of its own rather than a read through `_github_identity_fields`,
+    following `_repo_permission`'s precedent: that one shapes an audit record and
+    this one decides an authorization, and a helper serving both would invite
+    changing the log format into changing who gets admitted.
+    """
+    result = await session.execute(select(GithubIdentity.github_user_id).where(col(GithubIdentity.id) == identity_id))
+    return result.scalar_one_or_none()
+
+
+async def reattest_identity(
+    session: AsyncSession,
+    client: ReviewClient,
+    github_token: str,
+    github: GithubIdentityService,
+) -> None:
+    """Re-read a client's GitHub repo access from a fresh token, replacing the snapshot.
+
+    The refresh half of D-TTL. Check-in is already the grid's availability
+    signal, which makes it the natural place to ask "and are you still who you
+    said, with the same repos" — the alternative, polling GitHub for every
+    enrolled account, spends someone's rate limit to learn nothing most of the
+    time.
+
+    A token resolving to a *different* account than the client is linked to is
+    refused rather than accepted: re-attestation means "prove you are still the
+    account you enrolled as", so relinking here would quietly turn check-in into
+    an account-transfer endpoint and hand the client the other account's repos.
+    The one exception is a client with no identity at all — a row predating
+    GitHub-derived admission, which can currently lease nothing — where the same
+    call links it instead, because refusing would leave it unable to self-heal.
+
+    No-op outside github mode, the same inert carve-out `accessible_repo_names`
+    and `identity_access_is_stale` make: dev mode has no GitHub account behind a
+    client, so there is nothing to re-attest and a token here is meaningless.
+
+    Raises:
+        EnrolmentDeniedError: the token was rejected, or belongs to another
+            account (caller maps to 401).
+        EnrolmentUnavailableError: GitHub could not be reached. Transient, and
+            the caller is expected to let check-in proceed on the existing
+            snapshot — see check_in_endpoint.
+    """
+    if settings.client_enrolment_mode != "github":
+        return
+
+    github_identity, repo_access = await _read_github_identity(github, github_token)
+
+    if client.identity_id is not None:
+        linked_user_id = await _linked_github_user_id(session, client.identity_id)
+        # A missing row compares unequal and so is refused, which is the safe
+        # direction: an identity_id pointing at nothing is a broken invariant,
+        # not a client to re-link.
+        if linked_user_id != github_identity.github_user_id:
+            raise _denied(reason=REASON_IDENTITY_MISMATCH, detail=DETAIL_IDENTITY_MISMATCH)
+
+    identity = await get_or_create_identity(
+        session,
+        github_user_id=github_identity.github_user_id,
+        github_login=github_identity.github_login,
+        repo_access=repo_access,
+    )
+    if client.identity_id is None:
+        client.identity_id = identity.id
+        session.add(client)
+        await session.flush()  # type: ignore[attr-defined]
+
+    LOGGER.info(
+        "identity_reattested",
+        extra={
+            **get_logging_context(),
+            "client_id": str(client.id),
+            "github_login": identity.github_login,
+            "github_user_id": identity.github_user_id,
+            "accessible_repo_count": len(repo_access),
+        },
+    )
+
+
 async def resolve_enrolment_credential(
     session: AsyncSession,
     credential: str,
@@ -330,17 +474,7 @@ async def resolve_enrolment_credential(
         _resolve_dev_credential(credential)
         return None
 
-    try:
-        github_identity = await github.get_identity(credential)
-        repo_access = await github.get_repo_access(credential)
-    except GithubUnavailableError as exc:
-        raise _denied(
-            reason=REASON_GITHUB_UNREACHABLE,
-            detail="Could not verify enrolment with GitHub; try again shortly",
-            unavailable=True,
-        ) from exc
-    except GithubIdentityError as exc:
-        raise _denied(reason=REASON_CREDENTIAL_REJECTED, detail=DETAIL_CREDENTIAL_REJECTED) from exc
+    github_identity, repo_access = await _read_github_identity(github, credential)
 
     identity = await get_or_create_identity(
         session,

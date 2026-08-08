@@ -482,3 +482,42 @@ class TestClientEnrolmentConfig:
             settings.validate_config()
 
         assert "CLIENT_ENROLMENT_SECRET" in str(exc_info.value)
+
+
+class TestIdentityAccessTtlConfig:
+    """Tests for how long a cached GitHub access snapshot may be leased against.
+
+    Same chdir discipline as TestClientEnrolmentConfig, for the same reason: a
+    developer's hub/.env must not be able to decide whether these pass.
+    """
+
+    def test_identity_access_ttl_seconds_defaults_to_8_hours(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """8h by default, matching a GitHub user token's own lifetime.
+
+        The two expiring together is the point — a longer TTL here would keep
+        serving authorization from a snapshot the client can no longer refresh.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("IDENTITY_ACCESS_TTL_SECONDS", raising=False)
+
+        settings = Settings()
+
+        assert settings.identity_access_ttl_seconds == 8 * 60 * 60
+
+    def test_identity_access_ttl_seconds_rejects_below_floor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A sub-minute TTL would refuse leases faster than a client can re-attest."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("IDENTITY_ACCESS_TTL_SECONDS", "5")
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings()
+
+        assert "IDENTITY_ACCESS_TTL_SECONDS" in str(exc_info.value)

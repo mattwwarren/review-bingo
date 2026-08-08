@@ -105,6 +105,25 @@ class ReviewClientCreate(ReviewClientBase):
     """Registration payload."""
 
 
+class CheckInRequest(SQLModel):
+    """Optional body for POST /clients/check-in.
+
+    Wholly optional, and empty by default, because check-in's original job —
+    "I have compute, plug me in" — needs no body at all and must keep working
+    without one. The token is the opt-in half: it turns the same heartbeat into
+    a re-attestation of the caller's GitHub repo access. Spent once and never
+    persisted, exactly as at enrolment.
+    """
+
+    github_token: str | None = Field(
+        default=None,
+        description=(
+            "Fresh GitHub user token to re-attest repo access during check-in; omitted or falsy "
+            "leaves check-in a plain heartbeat"
+        ),
+    )
+
+
 class ReviewClientRead(ReviewClientBase):
     """Public view of a client — never includes the token hash."""
 

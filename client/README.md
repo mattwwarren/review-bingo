@@ -65,6 +65,33 @@ that is a finding, not a formality.
 - **503** — the hub could not reach GitHub. It fails closed rather than
   admitting you unverified; retry shortly.
 
+## Staying fresh: `check-in --reattest`
+
+The hub only dispatches against repo access it has read recently. That snapshot
+was taken when you enrolled, and nothing tells the hub when you lose access to a
+repo — so it expires (8h by default) and leasing starts answering **409, "check
+in again"** rather than serving work on an answer of unbounded age.
+
+```
+uv run client/bingo_client.py check-in --reattest
+```
+
+That re-runs the device flow and hands the hub a fresh token, which it spends
+once to re-read your repo access — repos you have gained appear, repos you have
+lost disappear — and then discards, same as at enrolment. A plain `check-in`
+stays a plain check-in: no GitHub call, no refresh.
+
+Opt-in because `loop` runs unattended — a device flow triggered on its own would
+sit waiting for a code nobody is there to type. Two ways it can be refused:
+
+- **401** — the token was rejected, *or* it belongs to a different GitHub account
+  than this client enrolled under. Check-in does not go through; re-attestation
+  proves you are still who you enrolled as, so it will not silently relink the
+  machine to another account.
+- If GitHub is unreachable, check-in **succeeds** and keeps your existing access
+  set. A GitHub incident should not take the grid offline for its duration; the
+  snapshot simply expires on its original schedule.
+
 ## Bring your own reviewer
 
 The hub never sees your prompts or review config. Set `REVIEW_CMD` to any

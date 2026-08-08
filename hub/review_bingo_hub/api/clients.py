@@ -18,6 +18,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.review_client import (
+    CheckInRequest,
     ClientStatus,
     ReviewClient,
     ReviewClientCreate,
@@ -35,6 +36,7 @@ from review_bingo_hub.services.identity_service import (
     DETAIL_UNKNOWN_CALLER,
     EnrolmentDeniedError,
     EnrolmentUnavailableError,
+    reattest_identity,
     resolve_enrolment_credential,
 )
 
@@ -101,8 +103,39 @@ async def register_client_endpoint(
 
 
 @router.post("/check-in", response_model=ReviewClientRead)
-async def check_in_endpoint(session: SessionDep, client: ClientDep) -> ReviewClientRead:
-    """Declare availability: 'I've got tokens — plug me in for a round.'"""
+async def check_in_endpoint(
+    session: SessionDep,
+    client: ClientDep,
+    github: GithubIdentityServiceDep,
+    payload: CheckInRequest | None = None,
+) -> ReviewClientRead:
+    """Declare availability: 'I've got tokens — plug me in for a round.'
+
+    An optional `github_token` in the body re-attests the caller's cached
+    GitHub repo access, refreshing `access_refreshed_at`. Omit it (or send a
+    falsy value) and check-in is unchanged — a plain heartbeat, no GitHub
+    call. A token that fails validation, or resolves to a different GitHub
+    account than this client is already linked to, is rejected with 401 and
+    check-in does not proceed.
+    """
+    if payload is not None and payload.github_token:
+        try:
+            await reattest_identity(session, client, github_token=payload.github_token, github=github)
+        except EnrolmentUnavailableError:
+            # Lenient on purpose, unlike enrolment's 503. Refusing a first
+            # enrolment over a GitHub outage costs the caller nothing it had;
+            # refusing every check-in would take the whole grid offline for the
+            # length of a GitHub incident.
+            #
+            # Safe only because of two things, and both must stay true. A
+            # revoked or rejected token arrives as EnrolmentDeniedError below,
+            # never here, so the fail-closed path is untouched. And this branch
+            # writes nothing at all — in particular it must never bump
+            # access_refreshed_at, which would let a swallowed outage extend the
+            # staleness clock past a revocation the hub never got to see.
+            pass
+        except EnrolmentDeniedError as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
     client = await set_client_status(session, client, ClientStatus.CHECKED_IN)
     await session.commit()
     return ReviewClientRead.model_validate(client)

@@ -31,7 +31,7 @@ from httpx import AsyncClient
 
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.github_identity import PermissionLevel
-from review_bingo_hub.services.github_identity_service import GithubRepoAccess
+from review_bingo_hub.services.github_identity_service import GithubRepoAccess, collapse_permissions
 from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
     FakeGithubIdentityService,
@@ -177,8 +177,18 @@ async def test_policy_write_rejected_for_maintain_collapsed_permission(
     maintainer looks like by the time it reaches this gate. Pinned separately
     so a future change that promoted `maintain` to `ADMIN` upstream would fail
     a test that names the role, not only one that names the enum value.
+
+    Driven through the real `collapse_permissions` rather than a hand-picked
+    `PermissionLevel.WRITE`: `GithubRepoAccess` only carries an
+    already-collapsed level, so the raw GitHub-shaped booleans are collapsed
+    here first, the same way `LiveGithubIdentityService.get_repo_access`
+    would, and the assertion below confirms that collapse actually lands on
+    `WRITE` before it is used to build the access entry.
     """
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.WRITE)])
+    maintain_permission = collapse_permissions({"admin": False, "maintain": True, "push": False, "pull": True})
+    assert maintain_permission == PermissionLevel.WRITE
+
+    enrolled = await enrol_github(client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=maintain_permission)])
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 

@@ -16,6 +16,7 @@ import pytest
 from httpx import AsyncClient
 
 from review_bingo_hub.core.config import settings
+from review_bingo_hub.tests.conftest import PLACEHOLDER_AUTH_HEADER
 
 PR_WEBHOOK_HEADERS = {"X-GitHub-Event": "pull_request"}
 
@@ -359,3 +360,19 @@ async def test_client_roster_lists_capabilities(client: AsyncClient) -> None:
     assert "roster-client" in names
     assert names["roster-client"]["status"] == "checked_in"
     assert names["roster-client"]["tier"] == "frontier"
+
+
+@pytest.mark.asyncio
+async def test_default_test_client_registers_under_dev_mode(client: AsyncClient) -> None:
+    """Every register_and_check_in() above depends on this equality holding.
+
+    The client fixture sends PLACEHOLDER_AUTH_HEADER on every request, and the
+    autouse config-isolation fixture pins CLIENT_ENROLMENT_SECRET to the same
+    string. If those two drift apart, the whole grid suite fails at
+    registration with a 401 that says nothing about why.
+    """
+    assert settings.client_enrolment_mode == "dev"
+    assert PLACEHOLDER_AUTH_HEADER == f"Bearer {settings.client_enrolment_secret}"
+
+    _, headers = await register_and_check_in(client, "dev-mode-client", "standard")
+    assert headers["Authorization"] != PLACEHOLDER_AUTH_HEADER

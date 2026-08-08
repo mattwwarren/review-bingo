@@ -72,6 +72,9 @@ def test_settings_factory() -> Callable[..., Settings]:
             "storage_aws_region": None,
             "storage_gcs_bucket": None,
             "storage_gcs_project_id": None,
+            "client_enrolment_mode": "github",
+            "client_enrolment_secret": None,
+            "github_app_client_id": None,
         }
 
         # Apply overrides

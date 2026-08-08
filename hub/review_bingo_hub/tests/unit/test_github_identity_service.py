@@ -30,7 +30,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "github"
 
 # Matches user_installations.json's first (review-bingo) installation.
 TEST_APP_ID = "424242"
-FAKE_TOKEN = "gho_16C7e42F292c6912E7710c838347Ae178B4a"  # noqa: S105 - fake, and its absence from logs is the test
+FAKE_TOKEN = "gho_16C7e42F292c6912E7710c838347Ae178B4a"
 
 
 def load_fixture(name: str) -> dict[str, Any]:
@@ -77,7 +77,7 @@ async def test_get_identity_returns_user_id_and_login(monkeypatch: pytest.Monkey
 
 
 async def test_get_identity_raises_on_401(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_transport(monkeypatch, lambda request: httpx.Response(401, json={"message": "Bad credentials"}))
+    patch_transport(monkeypatch, lambda _request: httpx.Response(401, json={"message": "Bad credentials"}))
 
     with pytest.raises(svc.GithubIdentityError) as exc_info:
         await svc.LiveGithubIdentityService().get_identity(FAKE_TOKEN)
@@ -87,7 +87,7 @@ async def test_get_identity_raises_on_401(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_get_identity_raises_unavailable_on_500(monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_transport(monkeypatch, lambda request: httpx.Response(500, json={"message": "boom"}))
+    patch_transport(monkeypatch, lambda _request: httpx.Response(500, json={"message": "boom"}))
 
     with pytest.raises(svc.GithubUnavailableError):
         await svc.LiveGithubIdentityService().get_identity(FAKE_TOKEN)
@@ -97,7 +97,7 @@ async def test_get_identity_logs_no_token_material(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    patch_transport(monkeypatch, lambda request: httpx.Response(200, json=load_fixture("user_identity.json")))
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json=load_fixture("user_identity.json")))
 
     with caplog.at_level(logging.DEBUG):
         await svc.LiveGithubIdentityService().get_identity(FAKE_TOKEN)
@@ -125,7 +125,7 @@ def repo_access_handler(
         if request.url.path.endswith("/repositories"):
             installation_id = int(request.url.path.split("/")[-2])
             return httpx.Response(200, json=repositories_by_installation[installation_id])
-        raise AssertionError(f"unexpected path {request.url.path}")
+        pytest.fail(f"unexpected path {request.url.path}")
 
     return handler
 
@@ -292,8 +292,9 @@ async def test_get_repo_access_paginates_installations_and_repos(monkeypatch: py
 async def test_get_repo_access_raises_on_github_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "github_app_id", TEST_APP_ID)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("name resolution failed")
+    def handler(_request: httpx.Request) -> httpx.Response:
+        error_msg = "name resolution failed"
+        raise httpx.ConnectError(error_msg)
 
     patch_transport(monkeypatch, handler)
 
@@ -303,12 +304,42 @@ async def test_get_repo_access_raises_on_github_unavailable(monkeypatch: pytest.
 
 async def test_get_repo_access_raises_on_credential_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "github_app_id", TEST_APP_ID)
-    patch_transport(monkeypatch, lambda request: httpx.Response(403, json={"message": "Forbidden"}))
+    patch_transport(monkeypatch, lambda _request: httpx.Response(403, json={"message": "Forbidden"}))
 
     with pytest.raises(svc.GithubIdentityError) as exc_info:
         await svc.LiveGithubIdentityService().get_repo_access(FAKE_TOKEN)
 
     assert not isinstance(exc_info.value, svc.GithubUnavailableError)
+
+
+# The three below cover the strict-parsing branches. They exist because the
+# GitHub fixtures in this suite are hand-built (see tests/fixtures/github/
+# README.md) and therefore cannot falsify our model of GitHub's shape. Strict
+# parsing is the instrument that will: when the real API disagrees with us,
+# these are the paths that fire instead of a silent empty result.
+
+
+async def test_get_identity_raises_when_response_lacks_id_and_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json={"message": "Not Found"}))
+
+    with pytest.raises(svc.GithubIdentityError):
+        await svc.LiveGithubIdentityService().get_identity(FAKE_TOKEN)
+
+
+async def test_get_identity_raises_unavailable_on_a_non_json_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A proxy's HTML error page is an outage, not a rejected credential."""
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, text="<html>502 Bad Gateway</html>"))
+
+    with pytest.raises(svc.GithubUnavailableError):
+        await svc.LiveGithubIdentityService().get_identity(FAKE_TOKEN)
+
+
+async def test_get_repo_access_raises_when_the_envelope_shape_is_unexpected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "github_app_id", TEST_APP_ID)
+    patch_transport(monkeypatch, lambda _request: httpx.Response(200, json={"total_count": 1}))
+
+    with pytest.raises(svc.GithubIdentityError):
+        await svc.LiveGithubIdentityService().get_repo_access(FAKE_TOKEN)
 
 
 def test_get_github_identity_service_returns_the_live_implementation() -> None:

@@ -372,7 +372,7 @@ async def test_default_test_client_registers_under_dev_mode(client: AsyncClient)
     registration with a 401 that says nothing about why.
     """
     assert settings.client_enrolment_mode == "dev"
-    assert PLACEHOLDER_AUTH_HEADER == f"Bearer {settings.client_enrolment_secret}"
+    assert f"Bearer {settings.client_enrolment_secret}" == PLACEHOLDER_AUTH_HEADER
 
     _, headers = await register_and_check_in(client, "dev-mode-client", "standard")
     assert headers["Authorization"] != PLACEHOLDER_AUTH_HEADER

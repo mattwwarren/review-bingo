@@ -9,6 +9,7 @@ Tests cover:
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -396,33 +397,49 @@ class TestValidateConfig:
 class TestClientEnrolmentConfig:
     """Tests for the grid client enrolment mode and its GitHub App credentials.
 
-    `_env_file=None` on every Settings() here: a developer's hub/.env (written
-    by scripts/github-app-setup.sh) must not be able to make these pass or
-    fail. The env var under test is the only input.
+    Settings resolves its `.env` relative to the working directory, so each of
+    these chdirs into an empty tmp_path first: a developer's hub/.env (written
+    by scripts/github-app-setup.sh) must not be able to make them pass or fail.
+    The env var under test is then the only input.
     """
 
-    def test_client_enrolment_mode_defaults_to_github(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_client_enrolment_mode_defaults_to_github(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
         """Unset CLIENT_ENROLMENT_MODE means GitHub-derived admission."""
+        monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("CLIENT_ENROLMENT_MODE", raising=False)
 
-        settings = Settings(_env_file=None)
+        settings = Settings()
 
         assert settings.client_enrolment_mode == "github"
 
-    def test_client_enrolment_mode_rejects_unknown_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_client_enrolment_mode_rejects_unknown_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
         """A typo must fail loudly, not silently fall back to an open door."""
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("CLIENT_ENROLMENT_MODE", "wide-open")
 
         with pytest.raises(ValidationError) as exc_info:
-            Settings(_env_file=None)
+            Settings()
 
         assert "CLIENT_ENROLMENT_MODE" in str(exc_info.value)
 
-    def test_github_app_client_id_configurable_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_github_app_client_id_configurable_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
         """The device flow needs the App's client id, distinct from its app id."""
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("GITHUB_APP_CLIENT_ID", "Iv23liTESTCLIENTID00")
 
-        settings = Settings(_env_file=None)
+        settings = Settings()
 
         assert settings.github_app_client_id == "Iv23liTESTCLIENTID00"
 

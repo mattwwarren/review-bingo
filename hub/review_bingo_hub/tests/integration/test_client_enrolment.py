@@ -23,7 +23,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from review_bingo_hub.core.config import settings
+from review_bingo_hub.core.config import Settings, settings
 from review_bingo_hub.main import app
 from review_bingo_hub.models.github_identity import (
     GithubIdentity,
@@ -39,8 +39,8 @@ from review_bingo_hub.services.github_identity_service import (
     get_github_identity_service,
 )
 
-GITHUB_TOKEN = "gho_16C7e42F292c6912E7710c838347Ae178B4a"  # noqa: S105 - fake; its absence from state is the assertion
-DEV_SECRET = "test-fixture-placeholder"  # noqa: S105 - matches conftest's PLACEHOLDER_AUTH_HEADER
+GITHUB_TOKEN = "gho_16C7e42F292c6912E7710c838347Ae178B4a"
+DEV_SECRET = "test-fixture-placeholder"
 
 REGISTRATION_PAYLOAD = {
     "name": "marge-mac-mini",
@@ -357,8 +357,6 @@ async def test_dev_mode_without_a_configured_secret_denies_everything(
 
 async def test_github_mode_is_the_default_without_explicit_config() -> None:
     """The secure branch is the one you get by doing nothing."""
-    from review_bingo_hub.core.config import Settings
-
     assert Settings.model_fields["client_enrolment_mode"].default == "github"
 
 

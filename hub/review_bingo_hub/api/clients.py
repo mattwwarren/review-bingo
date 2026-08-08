@@ -1,9 +1,12 @@
 """Grid client endpoints: register, check in, check out.
 
 Machines, not humans: clients authenticate with the bearer token minted at
-registration, not the user auth stack. Registration is open in v1 — anyone
-who can reach the hub can join the grid (see PITCH.md open questions for
-where this tightens up).
+registration, not the user auth stack. Admission is derived from GitHub: the
+client obtains a user access token through the App's device flow and
+presents it here; the hub reads identity and repo access from that token
+and then discards it — no GitHub credential is persisted. In dev mode
+(CLIENT_ENROLMENT_MODE=dev), a shared secret substitutes for the GitHub
+token so the grid can be exercised offline.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from review_bingo_hub.services.client_service import (
     register_client,
     set_client_status,
 )
+from review_bingo_hub.services.github_identity_service import GithubIdentityServiceDep
+from review_bingo_hub.services.identity_service import resolve_enrolment_credential
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -49,10 +54,38 @@ async def get_current_client(
 ClientDep = Annotated[ReviewClient, Depends(get_current_client)]
 
 
+async def get_enrolment_credential(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> str:
+    """Extract the credential a caller is enrolling with.
+
+    Deliberately a sibling of get_current_client rather than a reuse of it:
+    the header looks identical but the thing inside it is not a hub-minted
+    client token, and one function that "resolves whatever this bearer is"
+    would be one function away from accepting either at either endpoint.
+    """
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Enrolment credential required")
+    return credentials.credentials
+
+
+EnrolmentCredentialDep = Annotated[str, Depends(get_enrolment_credential)]
+
+
 @router.post("", response_model=ReviewClientRegistered, status_code=status.HTTP_201_CREATED)
-async def register_client_endpoint(payload: ReviewClientCreate, session: SessionDep) -> ReviewClientRegistered:
-    """Join the grid. The returned token is shown exactly once — store it."""
-    client, token = await register_client(session, payload)
+async def register_client_endpoint(
+    payload: ReviewClientCreate,
+    session: SessionDep,
+    credential: EnrolmentCredentialDep,
+    github: GithubIdentityServiceDep,
+) -> ReviewClientRegistered:
+    """Join the grid. The returned token is shown exactly once — store it.
+
+    Admission is resolved before anything is written, so a refused enrolment
+    leaves no client row behind.
+    """
+    identity_id = await resolve_enrolment_credential(session, credential, github)
+    client, token = await register_client(session, payload, identity_id=identity_id)
     await session.commit()
     return ReviewClientRegistered(client=ReviewClientRead.model_validate(client), token=token)
 

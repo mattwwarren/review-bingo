@@ -23,7 +23,6 @@ import secrets
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
@@ -42,6 +41,32 @@ LOGGER = logging.getLogger(__name__)
 
 REASON_CREDENTIAL_REJECTED = "credential_rejected"
 REASON_GITHUB_UNREACHABLE = "github_unreachable"
+
+DETAIL_CREDENTIAL_REJECTED = "Enrolment credential rejected"
+
+
+class EnrolmentDeniedError(Exception):
+    """The credential was explicitly rejected — not a transient condition.
+
+    A domain exception rather than an HTTPException: this module is called by
+    A2 (check-in re-attestation), A3 (dispatch filtering), and A4 (policy)
+    too, none of which are guaranteed to want POST /clients' own 401/503
+    HTTP mapping. The API layer translates this at the boundary instead.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(detail)
+
+
+class EnrolmentUnavailableError(Exception):
+    """GitHub could not be reached — a transient condition, worth a retry."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(detail)
 
 
 async def get_or_create_identity(
@@ -81,10 +106,14 @@ async def get_or_create_identity(
     return identity
 
 
-def _denied(reason: str, detail: str, status_code: int) -> HTTPException:
-    """Log the refusal, then build the error to raise. Never logs the credential."""
+def _denied(
+    *, reason: str, detail: str, unavailable: bool = False
+) -> EnrolmentDeniedError | EnrolmentUnavailableError:
+    """Log the refusal, then build the domain error to raise. Never logs the credential."""
     LOGGER.warning("enrolment_denied", extra={**get_logging_context(), "reason": reason})
-    return HTTPException(status_code=status_code, detail=detail)
+    if unavailable:
+        return EnrolmentUnavailableError(reason, detail)
+    return EnrolmentDeniedError(reason, detail)
 
 
 def _resolve_dev_credential(credential: str) -> None:
@@ -96,11 +125,7 @@ def _resolve_dev_credential(credential: str) -> None:
     """
     expected = settings.client_enrolment_secret
     if not expected or not secrets.compare_digest(credential, expected):
-        raise _denied(
-            REASON_CREDENTIAL_REJECTED,
-            "Enrolment credential rejected",
-            status.HTTP_401_UNAUTHORIZED,
-        )
+        raise _denied(reason=REASON_CREDENTIAL_REJECTED, detail=DETAIL_CREDENTIAL_REJECTED)
     LOGGER.warning("dev_mode_secret_used", extra={**get_logging_context()})
 
 
@@ -116,9 +141,9 @@ async def resolve_enrolment_credential(
     `github_identity` that no GitHub account corresponds to.
 
     Raises:
-        HTTPException: 401 when the credential is rejected, 503 when GitHub
-            could not be reached. Fails closed either way — no identity, no
-            client.
+        EnrolmentDeniedError: The credential was rejected (caller maps to 401).
+        EnrolmentUnavailableError: GitHub could not be reached (caller maps to
+            503). Fails closed either way — no identity, no client.
     """
     if settings.client_enrolment_mode != "github":
         _resolve_dev_credential(credential)
@@ -129,16 +154,12 @@ async def resolve_enrolment_credential(
         repo_access = await github.get_repo_access(credential)
     except GithubUnavailableError as exc:
         raise _denied(
-            REASON_GITHUB_UNREACHABLE,
-            "Could not verify enrolment with GitHub; try again shortly",
-            status.HTTP_503_SERVICE_UNAVAILABLE,
+            reason=REASON_GITHUB_UNREACHABLE,
+            detail="Could not verify enrolment with GitHub; try again shortly",
+            unavailable=True,
         ) from exc
     except GithubIdentityError as exc:
-        raise _denied(
-            REASON_CREDENTIAL_REJECTED,
-            "Enrolment credential rejected",
-            status.HTTP_401_UNAUTHORIZED,
-        ) from exc
+        raise _denied(reason=REASON_CREDENTIAL_REJECTED, detail=DETAIL_CREDENTIAL_REJECTED) from exc
 
     identity = await get_or_create_identity(
         session,

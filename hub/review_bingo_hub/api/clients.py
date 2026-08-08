@@ -31,7 +31,11 @@ from review_bingo_hub.services.client_service import (
     set_client_status,
 )
 from review_bingo_hub.services.github_identity_service import GithubIdentityServiceDep
-from review_bingo_hub.services.identity_service import resolve_enrolment_credential
+from review_bingo_hub.services.identity_service import (
+    EnrolmentDeniedError,
+    EnrolmentUnavailableError,
+    resolve_enrolment_credential,
+)
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -84,7 +88,12 @@ async def register_client_endpoint(
     Admission is resolved before anything is written, so a refused enrolment
     leaves no client row behind.
     """
-    identity_id = await resolve_enrolment_credential(session, credential, github)
+    try:
+        identity_id = await resolve_enrolment_credential(session, credential, github)
+    except EnrolmentDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+    except EnrolmentUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.detail) from exc
     client, token = await register_client(session, payload, identity_id=identity_id)
     await session.commit()
     return ReviewClientRegistered(client=ReviewClientRead.model_validate(client), token=token)

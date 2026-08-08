@@ -239,6 +239,33 @@ class Settings(BaseSettings):
         description="How long a client holds a review job lease before it is reclaimed",
     )
 
+    @staticmethod
+    def _validate_choice(value: str, allowed: list[str], field_name: str) -> str:
+        """Reject a config value outside its allowed set.
+
+        Shared by every field-level validator that needs this shape, so a
+        typo falls through to a loud `ValueError` at startup instead of
+        silently reaching whichever branch the code happens to treat as the
+        default — the failure mode that matters most for a field like
+        CLIENT_ENROLMENT_MODE, where the silent-default direction is an open
+        registration endpoint.
+
+        Args:
+            value: The configured value to validate
+            allowed: The values considered valid
+            field_name: The env var / field name, for the error message
+
+        Returns:
+            The validated value
+
+        Raises:
+            ValueError: If value is not in allowed
+        """
+        if value not in allowed:
+            error_msg = f"{field_name} '{value}' not allowed. Must be one of: {', '.join(allowed)}"
+            raise ValueError(error_msg)
+        return value
+
     @field_validator("jwt_algorithm")
     @classmethod
     def validate_jwt_algorithm(cls, value: str) -> str:
@@ -268,10 +295,7 @@ class Settings(BaseSettings):
             "PS384",
             "PS512",  # RSA-PSS
         ]
-        if value not in allowed_algorithms:
-            error_msg = f"JWT algorithm '{value}' not allowed. Must be one of: {', '.join(allowed_algorithms)}"
-            raise ValueError(error_msg)
-        return value
+        return cls._validate_choice(value, allowed_algorithms, "JWT algorithm")
 
     @field_validator("client_enrolment_mode")
     @classmethod
@@ -291,11 +315,7 @@ class Settings(BaseSettings):
         Raises:
             ValueError: If the mode is not "github" or "dev"
         """
-        allowed_modes = ["github", "dev"]
-        if value not in allowed_modes:
-            error_msg = f"CLIENT_ENROLMENT_MODE '{value}' not allowed. Must be one of: {', '.join(allowed_modes)}"
-            raise ValueError(error_msg)
-        return value
+        return cls._validate_choice(value, ["github", "dev"], "CLIENT_ENROLMENT_MODE")
 
     @property
     def cors_allowed_origins(self) -> list[str]:

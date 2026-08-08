@@ -43,12 +43,13 @@ State (hub URL + bearer token) lives in --state (default
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +124,79 @@ def run_review(job: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+@contextlib.contextmanager
+def _owned_or_shared_client(http: httpx.Client | None) -> Generator[httpx.Client]:
+    """Use the injected client (tests), or own a fresh one and close it after."""
+    if http is not None:
+        yield http
+        return
+    with httpx.Client(timeout=30.0) as client:
+        yield client
+
+
+def _request_device_code(
+    client: httpx.Client,
+    client_id: str,
+    echo: Callable[[str], None],
+) -> dict[str, Any]:
+    """Ask GitHub for a device code, print the code the operator must enter."""
+    response = client.post(
+        GITHUB_DEVICE_CODE_URL,
+        data={"client_id": client_id, "scope": "read:user"},
+        headers={"Accept": "application/json"},
+    )
+    response.raise_for_status()
+    grant: dict[str, Any] = response.json()
+    if "device_code" not in grant:
+        error_msg = f"GitHub refused the device-code request: {grant.get('error', grant)}"
+        raise DeviceFlowError(error_msg)
+
+    echo(f"\nOpen {grant['verification_uri']} and enter code:  {grant['user_code']}\n")
+    return grant
+
+
+def _poll_for_access_token(
+    client: httpx.Client,
+    client_id: str,
+    grant: dict[str, Any],
+    sleep: Callable[[float], None],
+) -> str:
+    """Poll GitHub's token endpoint until it issues a token or definitively refuses.
+
+    Every one of GitHub's poll responses means something different, and only
+    two of them mean "keep going". Treating them all as "not yet" is how a
+    client ends up polling github.com forever after the user clicked Deny.
+    """
+    interval = float(grant.get("interval", 5))
+    while True:
+        sleep(interval)
+        response = client.post(
+            GITHUB_ACCESS_TOKEN_URL,
+            data={"client_id": client_id, "device_code": grant["device_code"], "grant_type": DEVICE_GRANT_TYPE},
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        body = response.json()
+        if "access_token" in body:
+            return str(body["access_token"])
+
+        error = body.get("error")
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            # GitHub dictates the new floor; ignoring it earns a ban, not a token.
+            interval = float(body.get("interval", interval + 5))
+            continue
+        if error == "expired_token":
+            error_msg = "The device code expired before it was authorized — run `login` again."
+            raise DeviceFlowError(error_msg)
+        if error == "access_denied":
+            error_msg = "Authorization was denied on github.com — nothing was enrolled."
+            raise DeviceFlowError(error_msg)
+        error_msg = f"GitHub ended the device flow: {error or body}"
+        raise DeviceFlowError(error_msg)
+
+
 def device_flow_login(
     client_id: str,
     *,
@@ -130,59 +204,10 @@ def device_flow_login(
     sleep: Callable[[float], None] = time.sleep,
     echo: Callable[[str], None] = print,
 ) -> str:
-    """Run GitHub's device flow and return a user access token.
-
-    Every one of GitHub's poll responses means something different, and only
-    two of them mean "keep going". Treating them all as "not yet" is how a
-    client ends up polling github.com forever after the user clicked Deny.
-    """
-    owns_client = http is None
-    client = http if http is not None else httpx.Client(timeout=30.0)
-    try:
-        response = client.post(
-            GITHUB_DEVICE_CODE_URL,
-            data={"client_id": client_id, "scope": "read:user"},
-            headers={"Accept": "application/json"},
-        )
-        response.raise_for_status()
-        grant = response.json()
-        if "device_code" not in grant:
-            error_msg = f"GitHub refused the device-code request: {grant.get('error', grant)}"
-            raise DeviceFlowError(error_msg)
-
-        echo(f"\nOpen {grant['verification_uri']} and enter code:  {grant['user_code']}\n")
-        interval = float(grant.get("interval", 5))
-
-        while True:
-            sleep(interval)
-            response = client.post(
-                GITHUB_ACCESS_TOKEN_URL,
-                data={"client_id": client_id, "device_code": grant["device_code"], "grant_type": DEVICE_GRANT_TYPE},
-                headers={"Accept": "application/json"},
-            )
-            response.raise_for_status()
-            body = response.json()
-            if "access_token" in body:
-                return str(body["access_token"])
-
-            error = body.get("error")
-            if error == "authorization_pending":
-                continue
-            if error == "slow_down":
-                # GitHub dictates the new floor; ignoring it earns a ban, not a token.
-                interval = float(body.get("interval", interval + 5))
-                continue
-            if error == "expired_token":
-                error_msg = "The device code expired before it was authorized — run `login` again."
-                raise DeviceFlowError(error_msg)
-            if error == "access_denied":
-                error_msg = "Authorization was denied on github.com — nothing was enrolled."
-                raise DeviceFlowError(error_msg)
-            error_msg = f"GitHub ended the device flow: {error or body}"
-            raise DeviceFlowError(error_msg)
-    finally:
-        if owns_client:
-            client.close()
+    """Run GitHub's device flow and return a user access token."""
+    with _owned_or_shared_client(http) as client:
+        grant = _request_device_code(client, client_id, echo)
+        return _poll_for_access_token(client, client_id, grant, sleep)
 
 
 def enrol_with_hub(
@@ -193,9 +218,7 @@ def enrol_with_hub(
     http: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """POST /clients with the enrolment credential; returns the hub's response."""
-    owns_client = http is None
-    client = http if http is not None else httpx.Client(timeout=30.0)
-    try:
+    with _owned_or_shared_client(http) as client:
         response = client.post(
             f"{hub.rstrip('/')}/clients",
             json=payload,
@@ -204,9 +227,6 @@ def enrol_with_hub(
         response.raise_for_status()
         body: dict[str, Any] = response.json()
         return body
-    finally:
-        if owns_client:
-            client.close()
 
 
 def registration_payload(args: argparse.Namespace) -> dict[str, Any]:

@@ -309,6 +309,30 @@ async def test_targeted_lease_in_access_but_above_tier_still_403(
     assert "frontier" in response.json()["detail"]
 
 
+async def test_targeted_lease_in_access_hands_the_job_over(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for the targeted path — the other three cases are all refusals.
+
+    Without this, an access filter that excluded *everything* would satisfy
+    every 404 above and look correct.
+    """
+    job_id = await enqueue(client, ALLOWED, "target-in-access")
+
+    fake = FakeGithubIdentityService()
+    _, headers = await enrol_github_client(
+        client, monkeypatch, fake, Enrolee(login="picker", user_id=1, repo_access=[readable(ALLOWED)])
+    )
+
+    response = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease["job"]["id"] == job_id
+    assert lease["job"]["state"] == "leased"
+
+
 # ---------------------------------------------------------------------------
 # Job reads
 # ---------------------------------------------------------------------------
@@ -330,6 +354,11 @@ async def test_list_jobs_filters_to_callers_access_set(
 
     assert response.status_code == HTTPStatus.OK
     assert [job["id"] for job in response.json()] == [inside]
+
+    # The pre-existing state filter ANDs with the access filter, same as repo does.
+    queued = await client.get("/jobs", params={"state": "queued"}, headers=headers)
+    assert queued.status_code == HTTPStatus.OK
+    assert [job["id"] for job in queued.json()] == [inside]
 
 
 async def test_get_job_out_of_access_returns_404(

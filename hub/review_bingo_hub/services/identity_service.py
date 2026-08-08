@@ -99,8 +99,8 @@ class PolicyWriteForbiddenError(PolicyAuthorizationError):
 REASON_UNKNOWN_CALLER = "unknown_token"
 REASON_NOT_ADMIN = "not_admin"
 
-# Word-for-word the message get_current_client gives an unresolvable bearer, so
-# the two entry points cannot be told apart by their refusal text.
+# api/clients.py's get_current_client imports this rather than repeating the
+# literal, so the two entry points cannot be told apart by their refusal text.
 DETAIL_UNKNOWN_CALLER = "Unknown client token"
 DETAIL_NOT_ADMIN = "Repo admin access required to set this repo's policy"
 

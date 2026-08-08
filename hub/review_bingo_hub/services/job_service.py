@@ -56,7 +56,7 @@ async def _refuse_if_access_stale(session: AsyncSession, client: ReviewClient) -
         raise StaleIdentityAccessError
 
 
-async def _filter_to_access(session: AsyncSession, client: ReviewClient, query: Select) -> Select:
+async def _filter_to_access(session: AsyncSession, identity_id: UUID | None, query: Select) -> Select:
     """AND the caller's access set onto a ReviewJob query, or leave it untouched.
 
     The one place `lease_next_job`, `lease_specific_job`, and `list_jobs` apply
@@ -64,8 +64,11 @@ async def _filter_to_access(session: AsyncSession, client: ReviewClient, query: 
     slightly different where-clauses. ANDs with any other repo_full_name filter
     already on `query` — asking for a repo outside the access set is an
     ordinary empty result, not a special case.
+
+    Takes the identity rather than the client because a dashboard session is a
+    caller with an identity and no client row; see `identity_service.ScopedCaller`.
     """
-    access = await accessible_repo_names(session, client)
+    access = await accessible_repo_names(session, identity_id)
     if access is not None:
         query = query.where(col(ReviewJob.repo_full_name).in_(access))
     return query
@@ -170,7 +173,7 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
         .limit(1)
         .with_for_update(skip_locked=True)
     )
-    query = await _filter_to_access(session, client, query)
+    query = await _filter_to_access(session, client.identity_id, query)
 
     result = await session.execute(query)
     job = result.scalar_one_or_none()
@@ -205,7 +208,7 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
         .limit(1)
         .with_for_update(skip_locked=True)
     )
-    query = await _filter_to_access(session, client, query)
+    query = await _filter_to_access(session, client.identity_id, query)
 
     result = await session.execute(query)
     job = result.scalar_one_or_none()
@@ -258,18 +261,23 @@ async def get_job(session: AsyncSession, job_id: UUID) -> ReviewJob | None:
     return result.scalar_one_or_none()
 
 
-async def get_job_for_client(session: AsyncSession, client: ReviewClient, job_id: UUID) -> ReviewJob | None:
-    """Fetch a job this client is allowed to see, or None.
+async def get_job_for_identity(session: AsyncSession, identity_id: UUID | None, job_id: UUID) -> ReviewJob | None:
+    """Fetch a job this identity is allowed to see, or None.
 
     The 404 boundary: callers must **not** distinguish its two None cases.
     "No such job" and "a real job in a repo you cannot reach" have to answer
     identically, or the endpoint becomes an oracle that confirms which job ids
     exist — and with them, the repo layout of every other org on the hub.
+
+    Renamed from `get_job_for_client` in B1 (#24): the caller may now be a
+    dashboard session rather than a machine, and a name that says "client" would
+    have invited a second copy of this function for the browser — which is
+    exactly how two answers to one 404 boundary get born.
     """
     job = await get_job(session, job_id)
     if job is None:
         return None
-    access = await accessible_repo_names(session, client)
+    access = await accessible_repo_names(session, identity_id)
     if access is not None and job.repo_full_name not in access:
         return None
     return job
@@ -277,13 +285,15 @@ async def get_job_for_client(session: AsyncSession, client: ReviewClient, job_id
 
 async def list_jobs(
     session: AsyncSession,
-    client: ReviewClient,
+    identity_id: UUID | None,
     filters: ReviewJobFilters | None = None,
 ) -> list[ReviewJob]:
-    """The job feed, scoped to what this client may see.
+    """The job feed, scoped to what this identity may see.
 
-    `client` is required rather than optional: an access filter you can forget
-    to pass is one an endpoint will eventually forget to pass.
+    `identity_id` is a required positional rather than an optional keyword: an
+    access filter you can forget to pass is one an endpoint will eventually
+    forget to pass. None is a real value here (a caller with no GitHub account),
+    not "unscoped" — `accessible_repo_names` fails it closed.
     """
     filters = filters or ReviewJobFilters()
     query = select(ReviewJob).order_by(col(ReviewJob.created_at).desc()).offset(filters.offset).limit(filters.limit)
@@ -291,6 +301,6 @@ async def list_jobs(
         query = query.where(col(ReviewJob.state) == filters.state.value)
     if filters.repo_full_name is not None:
         query = query.where(col(ReviewJob.repo_full_name) == filters.repo_full_name)
-    query = await _filter_to_access(session, client, query)
+    query = await _filter_to_access(session, identity_id, query)
     result = await session.execute(query)
     return list(result.scalars().all())

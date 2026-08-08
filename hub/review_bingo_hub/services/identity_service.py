@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -44,6 +45,14 @@ LOGGER = logging.getLogger(__name__)
 REASON_CREDENTIAL_REJECTED = "credential_rejected"
 REASON_GITHUB_UNREACHABLE = "github_unreachable"
 REASON_IDENTITY_MISMATCH = "identity_mismatch"
+
+# The two terminal answers a device poll can give. Public, and living beside the
+# other REASON_* constants, so `api/auth.py` can log a device refusal under the
+# existing `enrolment_denied` event rather than inventing a second denial event:
+# "who was refused admission, and why" has to stay one question with one answer
+# in the log stream, not two nobody remembers to grep both of.
+REASON_DEVICE_TOKEN_EXPIRED = "device_token_expired"  # noqa: S105 - a reason code, not a credential
+REASON_DEVICE_ACCESS_DENIED = "device_access_denied"
 
 DETAIL_CREDENTIAL_REJECTED = "Enrolment credential rejected"
 DETAIL_GITHUB_UNREACHABLE = "Could not verify enrolment with GitHub; try again shortly"
@@ -152,28 +161,33 @@ async def get_or_create_identity(
     return identity
 
 
-async def accessible_repo_names(session: AsyncSession, client: ReviewClient) -> frozenset[str] | None:
-    """The repos this client's GitHub account may see, or None when scoping is inert.
+async def accessible_repo_names(session: AsyncSession, identity_id: UUID | None) -> frozenset[str] | None:
+    """The repos this GitHub account may see, or None when scoping is inert.
 
     The single place "what can this caller reach" is decided, so dispatch,
     reads, and the roster cannot drift into three different answers.
+
+    Keyed on the identity rather than on a `ReviewClient` since B1 (#24): a
+    dashboard session is a caller with an identity and no client row at all, and
+    a signature that demanded a machine would have forced a second, parallel
+    answer to this same question for the browser.
 
     Returns None to mean *unrestricted, filter by tier only* — the dev-mode
     carve-out. Under CLIENT_ENROLMENT_MODE=dev there is no GitHub account
     behind a client at all, so there is nothing to derive a scope from and
     pretending otherwise would just be a scope we invented.
 
-    Under github mode a client with no identity_id — a stale row from before
-    GitHub-derived admission landed — gets an empty frozenset, not None: no
-    account means nothing to match against, so nothing leases and nothing
+    Under github mode a caller with no identity_id — a stale client row from
+    before GitHub-derived admission landed — gets an empty frozenset, not None:
+    no account means nothing to match against, so nothing leases and nothing
     reads. Fails closed, and the distinction from None is load-bearing.
     """
     if settings.client_enrolment_mode != "github":
         return None
-    if client.identity_id is None:
+    if identity_id is None:
         return frozenset()
     result = await session.execute(
-        select(IdentityRepoAccess.repo_full_name).where(col(IdentityRepoAccess.identity_id) == client.identity_id)
+        select(IdentityRepoAccess.repo_full_name).where(col(IdentityRepoAccess.identity_id) == identity_id)
     )
     return frozenset(result.scalars().all())
 
@@ -212,7 +226,13 @@ async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) 
 
 
 async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
-    """The grid client behind a bearer credential, or a 401-shaped refusal."""
+    """The grid client behind a bearer credential, or a 401-shaped refusal.
+
+    Still client-only, on purpose. `resolve_scoped_caller` below is the wider
+    door for *reads*; this one stays narrow because its remaining caller is
+    `authorize_policy_write`, and a write path must not silently start accepting
+    a credential class it was never reviewed against.
+    """
     # Deferred, not top-level: client_service.py already imports
     # accessible_repo_names from this module (#22, job/roster access scoping),
     # so a top-level import here in the reverse direction is circular whichever
@@ -224,6 +244,56 @@ async def _resolve_caller_client(session: AsyncSession, credential: str) -> Revi
     if client is None:
         raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
     return client
+
+
+@dataclass(frozen=True)
+class ScopedCaller:
+    """Whoever is behind a bearer credential on a *read* endpoint.
+
+    Two credential classes resolve here — a grid client's registration token and
+    a dashboard session token — and what a read needs from either is the same
+    pair of facts: which GitHub account to scope by, and which client row (if
+    any) is the caller's own. Everything downstream keys on `identity_id`, so
+    the two callers cannot end up with two different access answers.
+
+    `client_id` is None for a dashboard session: a person has no machine on the
+    grid. That is why the roster's "always show me my own row" clause has to
+    tolerate its absence rather than assume it.
+    """
+
+    identity_id: UUID | None
+    client_id: UUID | None
+
+
+async def resolve_scoped_caller(session: AsyncSession, credential: str) -> ScopedCaller:
+    """Resolve a read credential to the identity it reads on behalf of.
+
+    Tries the client registry first and dashboard sessions second — order is
+    arbitrary for correctness (the two token spaces are 256-bit random and
+    disjoint in practice) but not for cost: the machine path is the hot one,
+    hit on every lease-adjacent read.
+
+    Raises:
+        PolicyCallerUnauthenticatedError: the credential resolves to neither a
+            registered client nor a live dashboard session (maps to 401). An
+            expired session lands here too, and must: to a caller it is
+            indistinguishable from a token that was never issued.
+    """
+    # Deferred for the same cycle-breaking reason as _resolve_caller_client's
+    # import above; dashboard_session_service imports client_service, which
+    # imports this module.
+    from review_bingo_hub.services.client_service import get_client_by_token  # noqa: PLC0415
+    from review_bingo_hub.services.dashboard_session_service import get_identity_id_for_token  # noqa: PLC0415
+
+    client = await get_client_by_token(session, credential)
+    if client is not None:
+        return ScopedCaller(identity_id=client.identity_id, client_id=client.id)
+
+    identity_id = await get_identity_id_for_token(session, credential)
+    if identity_id is not None:
+        return ScopedCaller(identity_id=identity_id, client_id=None)
+
+    raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
 
 
 async def _repo_permission(session: AsyncSession, identity_id: UUID, repo_full_name: str) -> PermissionLevel | None:
@@ -316,12 +386,17 @@ async def caller_accessible_repo_names(session: AsyncSession, credential: str) -
 
     An unknown token still raises. Read scoping is permissive by design, but
     never open to a credential that resolves to nobody.
+
+    Resolves through `resolve_scoped_caller` since B1 (#24), so a signed-in
+    dashboard narrows policy reads by the same access set its job feed already
+    uses. The signature is unchanged, which is why `api/policies.py` needed no
+    edit — the widening happens in one place or not at all.
     """
     if settings.client_enrolment_mode == "dev":
         _resolve_dev_credential(credential)
         return None
-    client = await _resolve_caller_client(session, credential)
-    return await accessible_repo_names(session, client)
+    caller = await resolve_scoped_caller(session, credential)
+    return await accessible_repo_names(session, caller.identity_id)
 
 
 def _denied(
@@ -454,6 +529,44 @@ async def reattest_identity(
     )
 
 
+async def resolve_identity_from_github_token(
+    session: AsyncSession,
+    github_token: str,
+    github: GithubIdentityService,
+) -> GithubIdentity:
+    """Spend a GitHub user token and return the identity row it resolves to.
+
+    Shared by client enrolment and dashboard login, which is the point: one
+    GitHub account is one `github_identity` row however it arrives, so a person
+    who enrolled a machine from the CLI and then opens the dashboard does not
+    end up as two accounts with two access snapshots that can disagree.
+
+    Raises:
+        EnrolmentDeniedError: The token was rejected (caller maps to 401).
+        EnrolmentUnavailableError: GitHub could not be reached (caller maps to
+            503). Fails closed either way — no identity is written.
+    """
+    github_identity, repo_access = await _read_github_identity(github, github_token)
+
+    identity = await get_or_create_identity(
+        session,
+        github_user_id=github_identity.github_user_id,
+        github_login=github_identity.github_login,
+        repo_access=repo_access,
+    )
+
+    LOGGER.info(
+        "identity_resolved",
+        extra={
+            **get_logging_context(),
+            "github_login": identity.github_login,
+            "github_user_id": identity.github_user_id,
+            "accessible_repo_count": len(repo_access),
+        },
+    )
+    return identity
+
+
 async def resolve_enrolment_credential(
     session: AsyncSession,
     credential: str,
@@ -474,22 +587,5 @@ async def resolve_enrolment_credential(
         _resolve_dev_credential(credential)
         return None
 
-    github_identity, repo_access = await _read_github_identity(github, credential)
-
-    identity = await get_or_create_identity(
-        session,
-        github_user_id=github_identity.github_user_id,
-        github_login=github_identity.github_login,
-        repo_access=repo_access,
-    )
-
-    LOGGER.info(
-        "identity_resolved",
-        extra={
-            **get_logging_context(),
-            "github_login": identity.github_login,
-            "github_user_id": identity.github_user_id,
-            "accessible_repo_count": len(repo_access),
-        },
-    )
+    identity = await resolve_identity_from_github_token(session, credential, github)
     return identity.id

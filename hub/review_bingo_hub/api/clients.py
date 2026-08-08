@@ -116,7 +116,12 @@ async def check_out_endpoint(session: SessionDep, client: ClientDep) -> ReviewCl
 
 
 @router.get("", response_model=list[ReviewClientRead])
-async def list_clients_endpoint(session: SessionDep, offset: int = 0, limit: int = 100) -> list[ReviewClientRead]:
-    """Roster for the dashboard: who's plugged in, with what capabilities."""
-    clients = await list_clients(session, offset=offset, limit=limit)
+async def list_clients_endpoint(
+    session: SessionDep,
+    client: ClientDep,
+    offset: int = 0,
+    limit: int = 100,
+) -> list[ReviewClientRead]:
+    """Roster for the dashboard: who's plugged in on repos this caller can see."""
+    clients = await list_clients(session, client, offset=offset, limit=limit)
     return [ReviewClientRead.model_validate(c) for c in clients]

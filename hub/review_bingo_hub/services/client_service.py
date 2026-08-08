@@ -7,15 +7,17 @@ import secrets
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
+from review_bingo_hub.models.github_identity import IdentityRepoAccess
 from review_bingo_hub.models.review_client import (
     ClientStatus,
     ReviewClient,
     ReviewClientCreate,
 )
+from review_bingo_hub.services.identity_service import accessible_repo_names
 
 
 def hash_token(token: str) -> str:
@@ -64,8 +66,35 @@ async def touch_client(session: AsyncSession, client: ReviewClient) -> None:
     await session.flush()  # type: ignore[attr-defined]
 
 
-async def list_clients(session: AsyncSession, offset: int = 0, limit: int = 100) -> list[ReviewClient]:
-    result = await session.execute(
-        select(ReviewClient).order_by(col(ReviewClient.created_at)).offset(offset).limit(limit)
-    )
+async def list_clients(
+    session: AsyncSession,
+    requester: ReviewClient,
+    offset: int = 0,
+    limit: int = 100,
+) -> list[ReviewClient]:
+    """The roster, scoped to machines the requester could plausibly share work with.
+
+    "Who else is plugged in" is not public: a full roster would tell anyone who
+    can enrol how many machines every other org runs, and under what identities.
+    So the roster is the overlap — clients enrolled under an identity that shares
+    at least one repo with the requester's access set — plus the requester's own
+    row, which is always visible even when it overlaps with nobody.
+
+    Unscoped under dev-mode enrolment, where there are no identities to overlap.
+    """
+    query = select(ReviewClient).order_by(col(ReviewClient.created_at)).offset(offset).limit(limit)
+
+    access = await accessible_repo_names(session, requester)
+    if access is not None:
+        overlapping_identities = (
+            select(IdentityRepoAccess.identity_id).where(col(IdentityRepoAccess.repo_full_name).in_(access)).distinct()
+        )
+        query = query.where(
+            or_(
+                col(ReviewClient.identity_id).in_(overlapping_identities),
+                col(ReviewClient.id) == requester.id,
+            )
+        )
+
+    result = await session.execute(query)
     return list(result.scalars().all())

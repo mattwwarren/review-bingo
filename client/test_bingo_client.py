@@ -188,3 +188,40 @@ def test_enrol_with_hub_surfaces_a_rejected_credential() -> None:
 
     with http_with(handler) as http, pytest.raises(httpx.HTTPStatusError):
         bingo_client.enrol_with_hub("http://hub.test", {}, "bad-token", http=http)
+
+
+# ---------------------------------------------------------------------------
+# check-in re-attestation
+# ---------------------------------------------------------------------------
+#
+# Re-attestation is opt-in because `loop` runs unattended: a check-in that
+# re-ran the device flow by default would stop a long-running client dead,
+# waiting for a human to type a code into github.com that nobody is watching
+# for. So the default stays a bare heartbeat and the hub's TTL, not the CLI,
+# decides the refresh cadence.
+
+
+def test_check_in_parser_defaults_to_no_reattest() -> None:
+    parser = bingo_client.build_parser()
+
+    args = parser.parse_args(["check-in"])
+
+    assert args.reattest is False
+
+
+def test_check_in_parser_accepts_reattest_and_client_id() -> None:
+    parser = bingo_client.build_parser()
+
+    args = parser.parse_args(["check-in", "--reattest", "--client-id", "Iv23liCLIENTID"])
+
+    assert args.reattest is True
+    assert args.client_id == "Iv23liCLIENTID"
+
+
+def test_check_in_payload_is_none_without_a_token() -> None:
+    """None, not {}: httpx sends it as an empty body, which is the old heartbeat exactly."""
+    assert bingo_client.check_in_payload(None) is None
+
+
+def test_check_in_payload_carries_the_token() -> None:
+    assert bingo_client.check_in_payload("gho_realtoken") == {"github_token": "gho_realtoken"}

@@ -32,16 +32,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
-from review_bingo_hub.models.github_identity import IdentityRepoAccess, PermissionLevel
+from review_bingo_hub.models.github_identity import IdentityRepoAccess
 from review_bingo_hub.models.review_client import ReviewClient, ReviewClientCreate
 from review_bingo_hub.services.client_service import register_client
 from review_bingo_hub.services.github_identity_service import GithubRepoAccess
-from review_bingo_hub.services.identity_service import accessible_repo_names, get_or_create_identity
+from review_bingo_hub.services.identity_service import (
+    accessible_repo_names,
+    get_or_create_identity,
+    identity_access_is_stale,
+)
+from review_bingo_hub.services.job_service import lease_next_job
 from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
     FakeGithubIdentityService,
+    backdate_access_refreshed_at,
     enrolment_headers,
     marge,
+    readable,
     use_github_mode,
 )
 
@@ -53,11 +60,6 @@ PR_WEBHOOK_HEADERS = {"X-GitHub-Event": "pull_request"}
 ALLOWED = "acme/payments"
 FORBIDDEN = "acme/other-repo"
 UNRELATED = "acme/unrelated"
-
-
-def readable(repo: str) -> GithubRepoAccess:
-    """One entry in the access snapshot GitHub reports for an account."""
-    return GithubRepoAccess(repo_full_name=repo, permission=PermissionLevel.READ)
 
 
 def pr_payload(repo: str, sha: str, number: int = 7) -> dict[str, Any]:
@@ -560,3 +562,235 @@ async def test_roster_unfiltered_in_dev_mode(client: AsyncClient) -> None:
 
     assert response.status_code == HTTPStatus.OK
     assert {row["id"] for row in response.json()} == {first_id, second_id}
+
+
+# ---------------------------------------------------------------------------
+# Staleness (D-TTL) — an access snapshot too old to lease against
+# ---------------------------------------------------------------------------
+#
+# Access scoping above answers "which repos"; this answers "how old an answer
+# will we still act on". The two are independent gates: everything below has a
+# perfectly good access set, and is refused purely on the age of the clock.
+#
+# The design decision these tests pin is *where* the gate sits. Leasing enforces
+# staleness; reads and reports do not. Leasing is the hub handing out new work
+# on the strength of a cached authorization, so that is the moment the age of
+# the cache matters. A read shows a client the queue it was already shown, and a
+# report is finished work whose authorization was granted at lease time — both
+# have a narrower blast radius than a fresh dispatch, and refusing the report
+# would destroy work rather than protect anything.
+
+
+DAY_SECONDS = 24 * 60 * 60
+
+
+async def identity_id_of(session: AsyncSession, client_id: str) -> UUID:
+    """The GitHub identity a registered client is linked to.
+
+    `expire_all()` first: `expire_on_commit=False` means a row this session read
+    before the enrolment request would still carry its pre-request values.
+    """
+    session.expire_all()
+    grid_client = (
+        await session.execute(select(ReviewClient).where(col(ReviewClient.id) == UUID(client_id)))
+    ).scalar_one()
+    assert grid_client.identity_id is not None
+    return grid_client.identity_id
+
+
+async def enrol_with_stale_access(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    login: str,
+) -> dict[str, str]:
+    """Enrol a client on ALLOWED, then age its access snapshot past the default TTL.
+
+    Backdates a full day rather than shrinking the TTL: these tests are about
+    the endpoint's refusal, and the boundary itself is pinned by the
+    `identity_access_is_stale` tests above. Returns the client's bearer headers.
+    """
+    fake = FakeGithubIdentityService()
+    client_id, headers = await enrol_github_client(
+        client, monkeypatch, fake, Enrolee(login=login, user_id=1, repo_access=[readable(ALLOWED)])
+    )
+    await backdate_access_refreshed_at(session, await identity_id_of(session, client_id), seconds_ago=DAY_SECONDS)
+    return headers
+
+
+async def test_identity_access_is_stale_true_past_ttl(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "client_enrolment_mode", "github")
+    monkeypatch.setattr(settings, "identity_access_ttl_seconds", 60)
+
+    identity = await get_or_create_identity(
+        session, github_user_id=1, github_login="aged", repo_access=[readable(ALLOWED)]
+    )
+    grid_client = await make_client_row(session, "aged-box", identity_id=identity.id)
+    await backdate_access_refreshed_at(session, identity.id, seconds_ago=3600)
+
+    assert await identity_access_is_stale(session, grid_client) is True
+
+
+async def test_identity_access_is_stale_false_within_ttl(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The positive control: a gate that returned True unconditionally would pass the rest."""
+    monkeypatch.setattr(settings, "client_enrolment_mode", "github")
+    monkeypatch.setattr(settings, "identity_access_ttl_seconds", 3600)
+
+    identity = await get_or_create_identity(
+        session, github_user_id=2, github_login="fresh", repo_access=[readable(ALLOWED)]
+    )
+    grid_client = await make_client_row(session, "fresh-box", identity_id=identity.id)
+    await backdate_access_refreshed_at(session, identity.id, seconds_ago=60)
+
+    assert await identity_access_is_stale(session, grid_client) is False
+
+
+async def test_identity_access_is_stale_false_in_dev_mode(session: AsyncSession) -> None:
+    """Dev mode has no GitHub snapshot to go stale, so the clock is not consulted."""
+    assert settings.client_enrolment_mode == "dev"
+
+    identity = await get_or_create_identity(
+        session, github_user_id=3, github_login="dev-mode", repo_access=[readable(ALLOWED)]
+    )
+    grid_client = await make_client_row(session, "dev-box", identity_id=identity.id)
+    await backdate_access_refreshed_at(session, identity.id, seconds_ago=DAY_SECONDS)
+
+    assert await identity_access_is_stale(session, grid_client) is False
+
+
+async def test_identity_access_is_stale_false_without_identity_id(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No account means no snapshot to age — and `accessible_repo_names` already fails it closed.
+
+    Calling this client stale would answer "check in again" to something whose
+    real problem is that it has an empty access set and can lease nothing
+    regardless. One refusal per cause.
+    """
+    monkeypatch.setattr(settings, "client_enrolment_mode", "github")
+
+    grid_client = await make_client_row(session, "stale-pre-a1-row")
+    assert grid_client.identity_id is None
+
+    assert await identity_access_is_stale(session, grid_client) is False
+
+
+async def test_lease_next_job_refused_when_access_stale(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leasable, in-access job is still refused once the snapshot is too old.
+
+    The job clears both existing gates — right repo, right tier — so only the
+    TTL can explain the 409.
+    """
+    await enqueue(client, ALLOWED, "stale-next")
+    headers = await enrol_with_stale_access(client, session, monkeypatch, "staler")
+
+    response = await client.post("/jobs/lease", headers=headers)
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert "check in again" in response.json()["detail"].lower()
+
+
+async def test_lease_specific_job_refused_when_access_stale(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Naming a job is not a way around the TTL, same as it is not a way around the floor.
+
+    409 rather than the 404 an out-of-access job gets: the caller *can* see this
+    repo, so there is no existence to protect — only a refresh to ask for.
+    """
+    job_id = await enqueue(client, ALLOWED, "stale-specific")
+    headers = await enrol_with_stale_access(client, session, monkeypatch, "specific-staler")
+
+    response = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+
+    assert response.status_code == HTTPStatus.CONFLICT
+    assert "check in again" in response.json()["detail"].lower()
+
+
+async def test_lease_next_job_unaffected_by_staleness_in_dev_mode(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    """The dev-mode carve-out is inert here too, and asserted rather than assumed.
+
+    Deliberately stronger than "a dev-mode client has no identity to age": this
+    one *does* link a fully backdated identity, so a staleness gate implemented
+    without the mode check would refuse, and only the carve-out can explain the
+    lease succeeding.
+    """
+    assert settings.client_enrolment_mode == "dev"
+    await enqueue(client, ALLOWED, "dev-mode-stale")
+
+    identity = await get_or_create_identity(
+        session, github_user_id=4, github_login="dev-mode-lease", repo_access=[readable(ALLOWED)]
+    )
+    grid_client = await make_client_row(session, "dev-lease-box", identity_id=identity.id)
+    await backdate_access_refreshed_at(session, identity.id, seconds_ago=DAY_SECONDS)
+
+    leased = await lease_next_job(session, grid_client)
+
+    assert leased is not None
+    assert leased.repo_full_name == ALLOWED
+
+
+async def test_list_jobs_unaffected_by_stale_access(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reads keep working on a stale snapshot — the gate is on leasing only.
+
+    A regression guard for the scope of the gate, not an oversight: pushing the
+    TTL onto reads would blank the dashboard of anyone who had not checked in
+    recently, without preventing a single dispatch.
+    """
+    job_id = await enqueue(client, ALLOWED, "stale-list")
+    headers = await enrol_with_stale_access(client, session, monkeypatch, "lister-staler")
+
+    response = await client.get("/jobs", headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    assert [job["id"] for job in response.json()] == [job_id]
+
+
+async def test_report_job_unaffected_by_stale_access(
+    client: AsyncClient,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lease granted while fresh can still be reported after the snapshot ages out.
+
+    The same reasoning as `test_report_succeeds_after_access_narrows_post_lease`,
+    applied to the other way authorization can go stale: the work is already
+    done, and refusing it would throw that work away without withdrawing an
+    access the client no longer has.
+    """
+    job_id = await enqueue(client, ALLOWED, "stale-report")
+
+    fake = FakeGithubIdentityService()
+    client_id, headers = await enrol_github_client(
+        client, monkeypatch, fake, Enrolee(login="reporter-staler", user_id=1, repo_access=[readable(ALLOWED)])
+    )
+    lease = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+    assert lease.status_code == HTTPStatus.OK
+
+    await backdate_access_refreshed_at(session, await identity_id_of(session, client_id), seconds_ago=DAY_SECONDS)
+
+    report = {"verdict": "approve", "summary": "Nothing found.", "findings": []}
+    response = await client.post(f"/jobs/{job_id}/report", json=report, headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["state"] == "relayed"

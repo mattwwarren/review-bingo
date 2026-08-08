@@ -19,6 +19,14 @@ floor, delivers a fake `pull_request` webhook, then a client registers,
 checks in, leases the job, reports a round, and the rendered PR comment is
 printed. Requires docker, uv, curl.
 
+```
+scripts/demo-tiers.sh
+```
+
+Same offline scaffold, walking the tier-floor scenario instead: a repo floor
+above `experimental` blocks an experimental client (dry queue, then 403 on
+naming the job directly) while a frontier client leases that exact job.
+
 ## Layout
 
 - [`hub/`](hub/) — the grid operator (FastAPI, from `fastapi-template`):

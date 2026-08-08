@@ -84,6 +84,15 @@ class ReviewClient(TimestampedTable, ReviewClientBase, table=True):
     __tablename__ = "review_client"
 
     token_hash: str = Field(index=True, unique=True, description="SHA-256 hex digest of the client's bearer token")
+    identity_id: UUID | None = Field(
+        default=None,
+        sa_column=sa.Column(
+            sa.UUID(as_uuid=True),
+            sa.ForeignKey("github_identity.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        description="GitHub account this client enrolled under; NULL under dev-mode enrolment",
+    )
     status: ClientStatus = Field(
         default=ClientStatus.CHECKED_OUT,
         sa_type=sa.String(),
@@ -101,6 +110,7 @@ class ReviewClientRead(ReviewClientBase):
 
     id: UUID
     status: ClientStatus
+    identity_id: UUID | None
     last_seen_at: datetime | None
     created_at: datetime
 

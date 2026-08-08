@@ -263,7 +263,7 @@ async def test_report_succeeds_after_access_narrows_post_lease(
     """Holding the lease is enough to report, even if access has since narrowed.
 
     Pins `report_job_endpoint`'s deliberate exception: it stays on the
-    unscoped `get_job` rather than `get_job_for_client`, because refusing a
+    unscoped `get_job` rather than `get_job_for_identity`, because refusing a
     report over a since-narrowed access snapshot would destroy a client's
     finished work without protecting anything the caller couldn't already
     reach when the lease was granted.

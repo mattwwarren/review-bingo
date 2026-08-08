@@ -268,10 +268,14 @@ class ScopedCaller:
 async def resolve_scoped_caller(session: AsyncSession, credential: str) -> ScopedCaller:
     """Resolve a read credential to the identity it reads on behalf of.
 
-    Tries the client registry first and dashboard sessions second — order is
+    Tries dashboard sessions first and the client registry second — order is
     arbitrary for correctness (the two token spaces are 256-bit random and
-    disjoint in practice) but not for cost: the machine path is the hot one,
-    hit on every lease-adjacent read.
+    disjoint in practice) but not for cost: every endpoint behind this
+    resolver is dashboard-polled (`/jobs`, `/clients`, and their
+    sub-resources), not lease-adjacent — grid clients only ever call
+    `POST /jobs/lease` and `POST /jobs/{id}/report`, which stay on `ClientDep`
+    and never reach here at all. So the dashboard-session lookup is the hit,
+    not the miss.
 
     Raises:
         PolicyCallerUnauthenticatedError: the credential resolves to neither a
@@ -285,13 +289,13 @@ async def resolve_scoped_caller(session: AsyncSession, credential: str) -> Scope
     from review_bingo_hub.services.client_service import get_client_by_token  # noqa: PLC0415
     from review_bingo_hub.services.dashboard_session_service import get_identity_id_for_token  # noqa: PLC0415
 
-    client = await get_client_by_token(session, credential)
-    if client is not None:
-        return ScopedCaller(identity_id=client.identity_id, client_id=client.id)
-
     identity_id = await get_identity_id_for_token(session, credential)
     if identity_id is not None:
         return ScopedCaller(identity_id=identity_id, client_id=None)
+
+    client = await get_client_by_token(session, credential)
+    if client is not None:
+        return ScopedCaller(identity_id=client.identity_id, client_id=client.id)
 
     raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
 

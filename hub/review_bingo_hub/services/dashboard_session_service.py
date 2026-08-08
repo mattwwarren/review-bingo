@@ -53,6 +53,12 @@ async def get_identity_id_for_token(session: AsyncSession, token: str) -> UUID |
     An expired row answers None rather than raising: to every caller, a session
     past its expiry is indistinguishable from a token that was never issued, and
     that is the honest answer — it authenticates nothing either way.
+
+    Accepted tradeoff: expired rows are filtered here, not deleted. This table
+    has no reap/cleanup job analogous to `job_service.reclaim_expired_leases`,
+    so it grows by one row per login indefinitely. Not a safety issue — an
+    expired row is already inert — but a real, unbounded storage cost that a
+    future cleanup sweep should address if row count ever matters.
     """
     result = await session.execute(
         select(DashboardSession.identity_id).where(

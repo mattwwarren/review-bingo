@@ -29,6 +29,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from review_bingo_hub.api.auth import DETAIL_GITHUB_UNREACHABLE, DETAIL_LOGIN_UNCONFIGURED
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.dashboard_session import DashboardSession
 from review_bingo_hub.models.github_identity import GithubIdentity
@@ -128,6 +129,7 @@ async def test_device_start_is_503_when_github_is_unreachable(
     response = await client.post("/auth/device/start")
 
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == DETAIL_GITHUB_UNREACHABLE
 
 
 async def test_device_start_is_503_when_github_refuses_our_client_id(
@@ -145,6 +147,7 @@ async def test_device_start_is_503_when_github_refuses_our_client_id(
     response = await client.post("/auth/device/start")
 
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    assert response.json()["detail"] == DETAIL_LOGIN_UNCONFIGURED
 
 
 # ---------------------------------------------------------------------------
@@ -403,13 +406,26 @@ async def test_device_poll_logs_neither_the_github_token_nor_the_session_token(
     with caplog.at_level(logging.DEBUG):
         response = await client.post("/auth/device/poll", json={"device_code": DEVICE_CODE})
 
-    session_token = response.json()["session_token"]
+    body = response.json()
+    session_token = body["session_token"]
     for record in caplog.records:
         rendered = dump(record)
         for secret in (GITHUB_TOKEN, session_token):
             assert secret not in rendered
             assert secret[:8] not in rendered
             assert secret[-8:] not in rendered
+
+    # The GitHub token is spent and dropped: it must never reach the response
+    # body at all, in any field. The session token *is* meant to be there,
+    # under its one designated field — so check every other field instead of
+    # asserting its absence from the whole body.
+    for field, value in body.items():
+        rendered_value = str(value)
+        assert GITHUB_TOKEN not in rendered_value
+        assert GITHUB_TOKEN[:8] not in rendered_value
+        assert GITHUB_TOKEN[-8:] not in rendered_value
+        if field != "session_token":
+            assert session_token not in rendered_value
 
 
 async def test_dashboard_login_reuses_an_identity_a_cli_enrolment_already_created(

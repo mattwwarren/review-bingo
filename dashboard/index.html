@@ -404,6 +404,12 @@
   function showLogin() {
     clearTimeout(loginTimer);
     el.signin.hidden = false;
+    // Every path that reveals this panel — first load, an expired session, a
+    // revoked one — must leave the button clickable. startLogin() disables it
+    // for the duration of one attempt; without this reset, a session that
+    // later expires would reopen the panel with a button nothing re-enabled.
+    el.signinStart.disabled = false;
+    el.signinStart.textContent = "Sign in with GitHub";
   }
 
   async function poll() {
@@ -473,7 +479,7 @@
       const response = await fetch(`${HUB}/auth/device/start`, { method: "POST" });
       const grant = await response.json().catch(() => ({}));
       if (!response.ok) {
-        loginFailed(grant.detail || "Could not start sign-in.");
+        loginFailed(errorDetail(grant, "Could not start sign-in."));
         return;
       }
       el.signinUri.textContent = grant.verification_uri;
@@ -500,7 +506,7 @@
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) {
-          loginFailed(body.detail || "Sign-in did not complete.");
+          loginFailed(errorDetail(body, "Sign-in did not complete."));
           return;
         }
         if (body.status === "authorized") {
@@ -518,6 +524,14 @@
         loginFailed("Lost the hub while signing in.");
       }
     }, Math.max(intervalSeconds || 5, 1) * 1000);
+  }
+
+  // FastAPI's own HTTPException(detail=...) paths always send a plain string,
+  // but a 422 the framework raises itself (a malformed body, before this
+  // page's own handler ever runs) sends `detail` as a list of {loc,msg,type}
+  // objects instead — not a string this UI can display as-is.
+  function errorDetail(body, fallback) {
+    return typeof body.detail === "string" ? body.detail : fallback;
   }
 
   function loginFailed(message) {

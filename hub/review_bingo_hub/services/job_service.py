@@ -255,7 +255,7 @@ async def get_job(session: AsyncSession, job_id: UUID) -> ReviewJob | None:
 
     Only for callers whose authorization is something other than repo access —
     `report_job_endpoint` gates on holding the lease. Anything answering a
-    *read* wants `get_job_for_client`.
+    *read* wants `get_job_for_identity`.
     """
     result = await session.execute(select(ReviewJob).where(col(ReviewJob.id) == job_id))
     return result.scalar_one_or_none()

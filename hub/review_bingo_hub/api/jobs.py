@@ -87,7 +87,7 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
     # never existed does — the access check must not confirm the id is real.
     # The tier check stays *after* it: a floor you could clear with a better
     # model is worth explaining, unlike a repo you cannot see.
-    job = await get_job_for_identity(session, client.identity_id, job_id)
+    job = await get_job_for_identity(session, identity_id=client.identity_id, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     # min_tier/tier are ModelTier at the type level but plain strings at runtime —
@@ -173,7 +173,7 @@ async def list_jobs_endpoint(
 
 @router.get("/{job_id}", response_model=ReviewJobRead)
 async def get_job_endpoint(job_id: UUID, session: SessionDep, caller: ScopedCallerDep) -> ReviewJobRead:
-    job = await get_job_for_identity(session, caller.identity_id, job_id)
+    job = await get_job_for_identity(session, identity_id=caller.identity_id, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return ReviewJobRead.model_validate(job)
@@ -182,7 +182,7 @@ async def get_job_endpoint(job_id: UUID, session: SessionDep, caller: ScopedCall
 @router.get("/{job_id}/comment", response_class=PlainTextResponse)
 async def job_comment_endpoint(job_id: UUID, session: SessionDep, caller: ScopedCallerDep) -> str:
     """The PR comment for a reported job — what the relay posts (or posted)."""
-    job = await get_job_for_identity(session, caller.identity_id, job_id)
+    job = await get_job_for_identity(session, identity_id=caller.identity_id, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     if job.verdict is None:
@@ -193,7 +193,7 @@ async def job_comment_endpoint(job_id: UUID, session: SessionDep, caller: Scoped
 @router.get("/{job_id}/relay-target")
 async def relay_target_endpoint(job_id: UUID, session: SessionDep, caller: ScopedCallerDep) -> dict[str, Any]:
     """Where this job's result goes (or went): github vs log mode."""
-    job = await get_job_for_identity(session, caller.identity_id, job_id)
+    job = await get_job_for_identity(session, identity_id=caller.identity_id, job_id=job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return relay_target(job)

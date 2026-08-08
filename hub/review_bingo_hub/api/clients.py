@@ -199,5 +199,7 @@ async def list_clients_endpoint(
     limit: int = 100,
 ) -> list[ReviewClientRead]:
     """Roster for the dashboard: who's plugged in on repos this caller can see."""
-    clients = await list_clients(session, caller.identity_id, caller.client_id, offset=offset, limit=limit)
+    clients = await list_clients(
+        session, identity_id=caller.identity_id, own_client_id=caller.client_id, offset=offset, limit=limit
+    )
     return [ReviewClientRead.model_validate(c) for c in clients]

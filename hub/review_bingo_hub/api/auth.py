@@ -197,10 +197,11 @@ async def _mint_session(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
 
     dashboard_session, token = await create_session(session, identity.id)
-    await session.commit()
 
-    # Identity fields, never credential material — the same rule
-    # `identity_resolved` follows, and the reason this login is auditable at all.
+    # Logged before the commit below, matching identity_resolved's own
+    # ordering: a crash between these two statements should lose the session
+    # it would have audited, not mint one with no audit trail behind it.
+    # Identity fields only, never credential material.
     LOGGER.info(
         "dashboard_session_created",
         extra={
@@ -209,6 +210,7 @@ async def _mint_session(
             "github_login": identity.github_login,
         },
     )
+    await session.commit()
 
     return DevicePollResponse(
         status=DevicePollStatus.AUTHORIZED,

@@ -12,6 +12,8 @@ admin check — the same carve-out POST /clients has, not a second one.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,6 +37,20 @@ _bearer = HTTPBearer(auto_error=False)
 NO_POLICY_DETAIL = "No policy for this repo"
 
 
+@asynccontextmanager
+async def _map_policy_auth_errors() -> AsyncIterator[None]:
+    """Translate the identity_service domain errors both dependencies below can raise.
+
+    One mapping in one place: `PolicyCallerUnauthenticatedError`/`EnrolmentDeniedError`
+    both mean "this credential resolves to nobody" (401) regardless of which
+    dependency hit them, so neither should carry its own copy of the mapping.
+    """
+    try:
+        yield
+    except (PolicyCallerUnauthenticatedError, EnrolmentDeniedError) as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+
+
 async def get_policy_write_authorization(
     owner: str,
     repo: str,
@@ -44,12 +60,11 @@ async def get_policy_write_authorization(
     """Refuse the request unless this caller administers this repo."""
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Policy write credential required")
-    try:
-        await authorize_policy_write(session, credentials.credentials, f"{owner}/{repo}")
-    except (PolicyCallerUnauthenticatedError, EnrolmentDeniedError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
-    except PolicyWriteForbiddenError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.detail) from exc
+    async with _map_policy_auth_errors():
+        try:
+            await authorize_policy_write(session, credentials.credentials, f"{owner}/{repo}")
+        except PolicyWriteForbiddenError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.detail) from exc
 
 
 RepoAdminDep = Annotated[None, Depends(get_policy_write_authorization)]
@@ -62,10 +77,8 @@ async def get_caller_accessible_repos(
     """The repo set to narrow policy reads to; None means no narrowing (dev mode)."""
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Policy read credential required")
-    try:
+    async with _map_policy_auth_errors():
         return await caller_accessible_repo_names(session, credentials.credentials)
-    except (PolicyCallerUnauthenticatedError, EnrolmentDeniedError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
 
 
 CallerAccessibleReposDep = Annotated[frozenset[str] | None, Depends(get_caller_accessible_repos)]

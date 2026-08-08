@@ -300,7 +300,7 @@
   const HUB = "";                 // same origin — the hub serves this page
   // The hub denies by default; /jobs and /clients need an Authorization header
   // to be present. Presence is all it checks — this placeholder validates
-  // nothing, and is replaced once real enrolment tokens exist.
+  // nothing, and is deleted by #24 when real dashboard sessions land.
   const AUTH_HEADER = "Bearer pending-enrolment";
   const POLL_MS = 2000;
   const LEASABLE = "queued";

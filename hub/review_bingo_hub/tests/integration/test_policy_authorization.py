@@ -143,7 +143,9 @@ async def test_policy_write_allowed_for_admin_permission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The positive control: recorded repo admin is what opens the write."""
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.ADMIN)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN)]
+    )
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "frontier"}, headers=enrolled.headers)
 
@@ -158,7 +160,9 @@ async def test_policy_write_rejected_for_write_permission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Push access is not policy access — the floor is an owner's decision."""
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.WRITE)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.WRITE)]
+    )
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 
@@ -188,7 +192,9 @@ async def test_policy_write_rejected_for_maintain_collapsed_permission(
     maintain_permission = collapse_permissions({"admin": False, "maintain": True, "push": False, "pull": True})
     assert maintain_permission == PermissionLevel.WRITE
 
-    enrolled = await enrol_github(client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=maintain_permission)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=maintain_permission)]
+    )
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 
@@ -199,7 +205,9 @@ async def test_policy_write_rejected_for_read_permission(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.READ)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.READ)]
+    )
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 
@@ -211,7 +219,9 @@ async def test_policy_write_rejected_when_repo_absent_from_access_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Admin on one repo is not admin on another — the check is per repo."""
-    enrolled = await enrol_github(client, monkeypatch, [access(OTHER_REPO, PermissionLevel.ADMIN)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=OTHER_REPO, permission=PermissionLevel.ADMIN)]
+    )
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=enrolled.headers)
 
@@ -268,7 +278,9 @@ async def test_policy_write_denied_logs_policy_write_denied(
     account tried to lower this repo's floor" must be answerable from the log
     stream alone.
     """
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.WRITE)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.WRITE)]
+    )
 
     with caplog.at_level(logging.DEBUG):
         response = await client.put(
@@ -301,7 +313,9 @@ async def test_policy_write_authorized_logs_policy_write_authorized(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Successful writes are logged too — an audit trail of only refusals is half a trail."""
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.ADMIN)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN)]
+    )
 
     with caplog.at_level(logging.DEBUG):
         response = await client.put(
@@ -415,7 +429,9 @@ async def test_get_single_policy_visible_with_read_permission(
 ) -> None:
     """Reading a floor takes any recorded access; only changing it takes admin."""
     await seed_policy(client, ADMIN_REPO, min_tier="frontier")
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.READ)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.READ)]
+    )
 
     response = await client.get(f"/policies/{ADMIN_REPO}", headers=enrolled.headers)
 
@@ -437,7 +453,9 @@ async def test_get_single_policy_hidden_when_repo_outside_access_set(
     to anyone who can enrol.
     """
     await seed_policy(client, HIDDEN_REPO)
-    enrolled = await enrol_github(client, monkeypatch, [access(ADMIN_REPO, PermissionLevel.ADMIN)])
+    enrolled = await enrol_github(
+        client, monkeypatch, repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN)]
+    )
 
     hidden = await client.get(f"/policies/{HIDDEN_REPO}", headers=enrolled.headers)
     never_existed = await client.get(f"/policies/{OTHER_REPO}", headers=enrolled.headers)
@@ -480,7 +498,10 @@ async def test_list_policies_filtered_to_caller_repos(
     enrolled = await enrol_github(
         client,
         monkeypatch,
-        [access(ADMIN_REPO, PermissionLevel.ADMIN), access(HIDDEN_REPO, PermissionLevel.READ)],
+        repo_access=[
+            access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN),
+            access(repo=HIDDEN_REPO, permission=PermissionLevel.READ),
+        ],
     )
 
     response = await client.get("/policies", headers=enrolled.headers)
@@ -503,7 +524,7 @@ async def test_list_policies_empty_access_set_returns_empty_list(
 ) -> None:
     """Seeing nothing is an answer, not an error — the caller is authenticated fine."""
     await seed_policy(client, ADMIN_REPO)
-    enrolled = await enrol_github(client, monkeypatch, [])
+    enrolled = await enrol_github(client, monkeypatch, repo_access=[])
 
     response = await client.get("/policies", headers=enrolled.headers)
 

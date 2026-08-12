@@ -111,6 +111,8 @@ class PolicyWriteForbiddenError(PolicyAuthorizationError):
 # The values are what they say: the caller could not be resolved.
 REASON_UNKNOWN_CALLER = "unknown_token"
 REASON_NOT_ADMIN = "not_admin"
+REASON_CLIENT_NOT_FOUND = "client_not_found"
+REASON_CLIENT_WRONG_IDENTITY = "client_wrong_identity"
 
 # The dev-mode bypass has no ReviewClient to name — no client is registered at
 # all for a raw shared-secret write. This sentinel makes that absence explicit
@@ -192,6 +194,17 @@ async def accessible_repo_names(session: AsyncSession, identity_id: UUID | None)
     return frozenset(result.scalars().all())
 
 
+def _snapshot_is_stale(refreshed_at: datetime) -> bool:
+    """The one TTL comparison both staleness answers share.
+
+    Extracted so `identity_access_is_stale` (keyed on a `ReviewClient`, with its
+    own mode/identity carve-outs) and `caller_identity_snapshot` (keyed directly
+    on an `identity_id` it has already resolved, with no carve-outs of its own
+    left to make) cannot drift into two different definitions of "too old".
+    """
+    return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
+
+
 async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) -> bool:
     """Whether this client's cached GitHub access is too old to lease against.
 
@@ -222,7 +235,7 @@ async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) 
     refreshed_at = result.scalar_one_or_none()
     if refreshed_at is None:
         return True
-    return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
+    return _snapshot_is_stale(refreshed_at)
 
 
 async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
@@ -334,6 +347,58 @@ async def _github_identity_fields(session: AsyncSession, identity_id: UUID | Non
     return {"github_login": row[0], "github_user_id": row[1]}
 
 
+@dataclass(frozen=True)
+class CallerIdentitySnapshot:
+    """What `GET /auth/me` reports for the caller's own account.
+
+    Bundles the identity fields with the repo-access snapshot in one dataclass
+    rather than returning them separately, since `/auth/me` always wants both
+    together and a caller with no identity row gets `None` from
+    `caller_identity_snapshot` rather than a snapshot with empty fields.
+    """
+
+    github_login: str
+    access_refreshed_at: datetime
+    access_is_stale: bool
+    repo_access: list[GithubRepoAccess]
+
+
+async def caller_identity_snapshot(session: AsyncSession, identity_id: UUID) -> CallerIdentitySnapshot | None:
+    """The identity fields and repo-access snapshot `/auth/me` reports, or None if the row is gone.
+
+    Two queries rather than a join, mirroring `_github_identity_fields` and
+    `accessible_repo_names`'s own query shapes: this is a read-path helper, not
+    a hot one, and matching the module's existing query shapes keeps the three
+    "what does this identity_id resolve to" answers easy to compare by eye.
+    """
+    result = await session.execute(
+        select(GithubIdentity.github_login, GithubIdentity.access_refreshed_at).where(
+            col(GithubIdentity.id) == identity_id
+        )
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None
+    github_login, refreshed_at = row
+
+    access_result = await session.execute(
+        select(IdentityRepoAccess.repo_full_name, IdentityRepoAccess.permission).where(
+            col(IdentityRepoAccess.identity_id) == identity_id
+        )
+    )
+    repo_access = [
+        GithubRepoAccess(repo_full_name=repo_full_name, permission=permission)
+        for repo_full_name, permission in access_result.all()
+    ]
+
+    return CallerIdentitySnapshot(
+        github_login=github_login,
+        access_refreshed_at=refreshed_at,
+        access_is_stale=_snapshot_is_stale(refreshed_at),
+        repo_access=repo_access,
+    )
+
+
 async def authorize_policy_write(session: AsyncSession, credential: str, repo_full_name: str) -> None:
     """Admit or refuse a PUT /policies/{owner}/{repo} call.
 
@@ -377,6 +442,104 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
         LOGGER.warning("policy_write_denied", extra={**log_extra, "permission": permission})
         raise PolicyWriteForbiddenError(reason=REASON_NOT_ADMIN, detail=DETAIL_NOT_ADMIN)
     LOGGER.info("policy_write_authorized", extra=log_extra)
+
+
+async def authorize_client_revoke(session: AsyncSession, credential: str, client_id: UUID) -> ReviewClient | None:
+    """Admit or refuse a `DELETE /clients/{client_id}` call, returning the target.
+
+    dev mode: the shared enrolment secret may revoke any client — the same
+    comparison `POST /clients` and `PUT /policies/{owner}/{repo}` already make
+    (`_resolve_dev_credential`), not a parallel one, so there is still one
+    named bypass rather than three. A client's own hub-minted token is not that
+    secret and does not open this door.
+
+    github mode: the caller's identity must equal the target's. Either
+    credential kind resolves here (`resolve_scoped_caller`), because RFC 0002
+    D-SELFREVOKE names the *identity*, not the machine — the client that needs
+    revoking is very often the one that cannot make the call. A caller with no
+    identity at all fails closed, exactly as it does for dispatch and for
+    policy writes: `None == None` would otherwise read as "same identity" and
+    hand every identity-less client the power to revoke every other one.
+
+    Returns None for both "no such client" and "someone else's client", and the
+    endpoint answers 404 to either (RFC 0001 D-404). Distinguishing them would
+    make this an oracle for which client ids are real, and with them how many
+    machines every other org runs.
+
+    That collapse governs the caller-visible response and nothing else. Both
+    refusals are logged as `client_revoke_denied`, carrying an internal `reason`
+    that *does* say which happened, plus the caller identity fields and the
+    requested `target_client_id`. `target_client_name` appears only when a row
+    was actually found — there is nothing to name otherwise, and an empty name
+    would read as a real client rather than an absent one. A hub operator
+    reading the log stream is not a caller probing the endpoint.
+
+    On authorization, the ids of the target's REPORTED/RELAYED jobs are read
+    *before* the caller deletes it and logged as `reported_jobs_detached` /
+    `reported_job_ids`: `review_job.reported_by` is ON DELETE SET NULL, so the
+    delete quietly detaches every finished round from the machine that produced
+    it. The delete still proceeds — the verdict content survives on the job row
+    and in the PR comment, and gating self-service revocation on review history
+    would defeat the point — but the loss is recorded rather than silent.
+
+    Raises:
+        PolicyCallerUnauthenticatedError: credential resolves to nobody (401).
+        EnrolmentDeniedError: dev-mode secret rejected (401).
+    """
+    # Deferred for the same cycle-breaking reason as `_resolve_caller_client`'s
+    # import above: both client_service and job_service import this module at
+    # top level, so the reverse imports have to happen at call time.
+    from review_bingo_hub.services.client_service import get_client_by_id  # noqa: PLC0415
+    from review_bingo_hub.services.job_service import reported_jobs_for_client  # noqa: PLC0415
+
+    dev_mode = settings.client_enrolment_mode == "dev"
+    caller_identity_id: UUID | None = None
+    caller_fields: dict[str, str | int | None]
+
+    if dev_mode:
+        _resolve_dev_credential(credential)
+        caller_fields = {"caller_identity": CALLER_IDENTITY_UNAVAILABLE_DEV_MODE}
+        LOGGER.warning(
+            "client_revoke_dev_mode_bypass",
+            extra={**get_logging_context(), "target_client_id": str(client_id), **caller_fields},
+        )
+    else:
+        caller = await resolve_scoped_caller(session, credential)
+        caller_identity_id = caller.identity_id
+        caller_fields = {
+            "identity_id": str(caller_identity_id) if caller_identity_id else None,
+            **(await _github_identity_fields(session, caller_identity_id)),
+        }
+
+    log_extra: dict[str, object] = {
+        **get_logging_context(),
+        "target_client_id": str(client_id),
+        **caller_fields,
+    }
+
+    target = await get_client_by_id(session, client_id)
+    if target is None:
+        LOGGER.warning("client_revoke_denied", extra={**log_extra, "reason": REASON_CLIENT_NOT_FOUND})
+        return None
+
+    if not dev_mode and (caller_identity_id is None or target.identity_id != caller_identity_id):
+        LOGGER.warning(
+            "client_revoke_denied",
+            extra={**log_extra, "reason": REASON_CLIENT_WRONG_IDENTITY, "target_client_name": target.name},
+        )
+        return None
+
+    detached = await reported_jobs_for_client(session, target.id)
+    LOGGER.info(
+        "client_revoke_authorized",
+        extra={
+            **log_extra,
+            "target_client_name": target.name,
+            "reported_jobs_detached": len(detached),
+            "reported_job_ids": [str(job_id) for job_id in detached],
+        },
+    )
+    return target
 
 
 async def caller_accessible_repo_names(session: AsyncSession, credential: str) -> frozenset[str] | None:

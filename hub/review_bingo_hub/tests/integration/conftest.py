@@ -44,7 +44,9 @@ from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.main import app
+from review_bingo_hub.models.dashboard_session import DashboardSession
 from review_bingo_hub.models.github_identity import GithubIdentity, PermissionLevel
+from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.github_identity_service import (
     DeviceCodeGrant,
     DevicePollResult,
@@ -189,6 +191,25 @@ async def backdate_access_refreshed_at(session: AsyncSession, identity_id: UUID,
         update(GithubIdentity)
         .where(col(GithubIdentity.id) == identity_id)
         .values(access_refreshed_at=datetime.now(UTC) - timedelta(seconds=seconds_ago))
+    )
+    await session.commit()
+
+
+async def expire_session_for(session: AsyncSession, token: str) -> None:
+    """Age one dashboard session past its expiry, then commit so the app sees it.
+
+    A direct column write rather than a frozen clock, matching
+    `backdate_access_refreshed_at`: the suite has no freezegun, and the expiry
+    rule reads exactly this one column.
+
+    Promoted here from `test_dashboard_session_scoped_access.py` when
+    `test_auth_me.py` arrived as a second consumer, per this module's own
+    documented promotion policy.
+    """
+    await session.execute(
+        update(DashboardSession)
+        .where(col(DashboardSession.token_hash) == hash_token(token))
+        .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
     )
     await session.commit()
 

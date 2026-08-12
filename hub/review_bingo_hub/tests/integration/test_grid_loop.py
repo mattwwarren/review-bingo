@@ -405,6 +405,70 @@ async def test_client_roster_lists_capabilities(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_requested_enqueues_a_job(client: AsyncClient) -> None:
+    response = await client.post(
+        "/webhooks/github",
+        json=pr_payload(action="review_requested", sha="review-requested-sha"),
+        headers=PR_WEBHOOK_HEADERS,
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_review_requested_dedup_then_fresh_job_after_report(client: AsyncClient) -> None:
+    """A review_requested delivery dedupes like any other reviewable action.
+
+    Chains lease -> report -> a third redelivery in one test (mirroring
+    test_closed_pr_leaves_a_round_already_in_flight_alone's style) to prove the
+    third delivery gets a fresh job, not a resurrection of the relayed one.
+    """
+    payload = pr_payload(action="review_requested", sha="review-requested-dedup-sha")
+
+    response = await client.post("/webhooks/github", json=payload, headers=PR_WEBHOOK_HEADERS)
+    assert response.json()["status"] == "queued"
+    first_job_id = response.json()["job_id"]
+
+    # Redelivery while queued: no-op
+    response = await client.post("/webhooks/github", json=payload, headers=PR_WEBHOOK_HEADERS)
+    assert response.json()["status"] == "skipped"
+
+    _, headers = await register_and_check_in(client, "review-requested-leaser", "standard")
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease["job"]["id"] == first_job_id
+    assert lease["job"]["state"] == "leased"
+
+    # Redelivery while leased: still no-op
+    response = await client.post("/webhooks/github", json=payload, headers=PR_WEBHOOK_HEADERS)
+    assert response.json()["status"] == "skipped"
+
+    report = {"verdict": "approve", "summary": "looks good"}
+    response = await client.post(f"/jobs/{first_job_id}/report", json=report, headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["state"] == "relayed"
+
+    # Redelivery after the round relays: a fresh job, not a resurrection.
+    response = await client.post("/webhooks/github", json=payload, headers=PR_WEBHOOK_HEADERS)
+    assert response.json()["status"] == "queued"
+    assert response.json()["job_id"] != first_job_id
+
+
+@pytest.mark.asyncio
+async def test_disabled_repo_queues_nothing_for_review_requested(client: AsyncClient) -> None:
+    repo = "acme/frozen-review-requested"
+    await client.put(f"/policies/{repo}", json={"min_tier": "experimental", "enabled": False})
+
+    response = await client.post(
+        "/webhooks/github",
+        json=pr_payload(repo=repo, action="review_requested", sha="frozen-review-requested-sha"),
+        headers=PR_WEBHOOK_HEADERS,
+    )
+    assert response.json()["status"] == "skipped"
+
+
+@pytest.mark.asyncio
 async def test_default_test_client_registers_under_dev_mode(client: AsyncClient) -> None:
     """Every register_and_check_in() above depends on this equality holding.
 

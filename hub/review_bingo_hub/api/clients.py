@@ -12,6 +12,7 @@ token so the grid can be exercised offline.
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -28,6 +29,7 @@ from review_bingo_hub.models.review_client import (
     ReviewClientRegistered,
 )
 from review_bingo_hub.services.client_service import (
+    delete_client,
     get_client_by_token,
     list_clients,
     register_client,
@@ -40,10 +42,12 @@ from review_bingo_hub.services.identity_service import (
     EnrolmentUnavailableError,
     PolicyCallerUnauthenticatedError,
     ScopedCaller,
+    authorize_client_revoke,
     reattest_identity,
     resolve_enrolment_credential,
     resolve_scoped_caller,
 )
+from review_bingo_hub.services.job_service import release_leased_jobs_for_client
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -123,6 +127,28 @@ async def get_enrolment_credential(
 EnrolmentCredentialDep = Annotated[str, Depends(get_enrolment_credential)]
 
 
+async def get_revoke_credential(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> str:
+    """Extract the credential a caller is revoking with.
+
+    A fourth sibling rather than a reuse of any of the three above, for the
+    reason they already document: the header looks identical here too, and what
+    is inside it is a fourth thing again — a dev-mode shared secret, a grid
+    client's own token, or a dashboard session's. Which of those is acceptable
+    is `authorize_client_revoke`'s decision, made against the *target* as well
+    as the caller, so this dependency deliberately resolves nothing and defers
+    all of it, exactly as `get_enrolment_credential` defers to POST /clients'
+    own authorization step.
+    """
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Revocation credential required")
+    return credentials.credentials
+
+
+RevokeCredentialDep = Annotated[str, Depends(get_revoke_credential)]
+
+
 @router.post("", response_model=ReviewClientRegistered, status_code=status.HTTP_201_CREATED)
 async def register_client_endpoint(
     payload: ReviewClientCreate,
@@ -200,6 +226,42 @@ async def check_out_endpoint(session: SessionDep, client: ClientDep) -> ReviewCl
     client = await set_client_status(session, client, ClientStatus.CHECKED_OUT)
     await session.commit()
     return ReviewClientRead.model_validate(client)
+
+
+@router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_client_endpoint(client_id: UUID, session: SessionDep, credential: RevokeCredentialDep) -> None:
+    """Retire a machine bound to your own GitHub identity, for good.
+
+    Check-out is the courtesy a working client sends; this is for the ones that
+    cannot send it — lost, compromised, or already decommissioned. The row is
+    hard-deleted, so its bearer token stops resolving immediately, and any lease
+    it was holding is released for requeue rather than left to time out.
+
+    A caller may revoke any client under its own identity, reaching it with
+    either that client's token or a signed-in dashboard session. Anything else
+    — including a client id that simply does not exist — is a 404, which
+    deliberately does not confirm whether the id is real (RFC 0001 D-404).
+
+    Removing *someone else's* machine is not an endpoint here on purpose:
+    revoke their repo access in GitHub and their next attestation, or the access
+    TTL, ends their leasing. A hub-side cross-user kick would be a second,
+    staler authority over who can reach a repo (RFC 0002 D-SELFREVOKE).
+    """
+    try:
+        target = await authorize_client_revoke(session, credential, client_id)
+    except PolicyCallerUnauthenticatedError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+    except EnrolmentDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+
+    # Order is load-bearing: review_job.leased_by is ON DELETE SET NULL, so
+    # releasing after the delete would find nothing to release and strand the
+    # job in `leased` with no leaseholder.
+    await release_leased_jobs_for_client(session, target.id)
+    await delete_client(session, target)
+    await session.commit()
 
 
 @router.get("", response_model=list[ReviewClientRead])

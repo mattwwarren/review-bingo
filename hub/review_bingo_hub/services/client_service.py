@@ -51,6 +51,33 @@ async def get_client_by_token(session: AsyncSession, token: str) -> ReviewClient
     return result.scalar_one_or_none()
 
 
+async def get_client_by_id(session: AsyncSession, client_id: UUID) -> ReviewClient | None:
+    """Look a client up by its row id rather than by the token it presents.
+
+    A sibling of `get_client_by_token`, not a widening of it: this one answers
+    "which client is being *talked about*" (a path parameter someone typed),
+    where that one answers "which client is *calling*". Keeping them apart is
+    what lets revocation authorize a caller against a target at all.
+    """
+    result = await session.execute(select(ReviewClient).where(col(ReviewClient.id) == client_id))
+    return result.scalar_one_or_none()
+
+
+async def delete_client(session: AsyncSession, client: ReviewClient) -> None:
+    """Remove a client from the grid for good.
+
+    A hard delete, not a status flag: the whole point of revocation is that the
+    bearer token stops resolving, and `get_client_by_token` finds a soft-deleted
+    row exactly as well as a live one. A revoked machine that could still check
+    in would be a revocation in name only.
+
+    Callers must release the client's leases first — see
+    `job_service.release_leased_jobs_for_client` for why the order matters.
+    """
+    await session.delete(client)
+    await session.flush()  # type: ignore[attr-defined]
+
+
 async def set_client_status(session: AsyncSession, client: ReviewClient, status: ClientStatus) -> ReviewClient:
     client.status = status
     client.last_seen_at = datetime.now(UTC)

@@ -21,19 +21,14 @@ Two properties matter more than the rest:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
 from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import col
 
-from review_bingo_hub.models.dashboard_session import DashboardSession
 from review_bingo_hub.models.repo_policy import RepoPolicyUpsert
-from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.policy_service import upsert_policy
 from review_bingo_hub.tests.integration.conftest import (
     ALLOWED,
@@ -43,26 +38,12 @@ from review_bingo_hub.tests.integration.conftest import (
     FakeGithubIdentityService,
     enqueue,
     enrol_github_client,
+    expire_session_for,
     readable,
     start_dashboard_session,
 )
 
 VIEWER = Enrolee(login="marge-viewer", user_id=91, repo_access=[readable(ALLOWED)])
-
-
-async def expire_session_for(session: AsyncSession, token: str) -> None:
-    """Age one dashboard session past its expiry, then commit so the app sees it.
-
-    A direct column write rather than a frozen clock, matching
-    `backdate_access_refreshed_at`: the suite has no freezegun, and the expiry
-    rule reads exactly this one column.
-    """
-    await session.execute(
-        update(DashboardSession)
-        .where(col(DashboardSession.token_hash) == hash_token(token))
-        .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
-    )
-    await session.commit()
 
 
 # ---------------------------------------------------------------------------

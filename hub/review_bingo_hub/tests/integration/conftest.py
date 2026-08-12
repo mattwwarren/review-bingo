@@ -15,6 +15,12 @@ enrolment one.
 re-attestation (`test_client_enrolment.py`) and the access-staleness gate
 (`test_repo_scoped_access.py`) both have to age the same clock.
 
+`access` arrived from `test_policy_authorization.py` when RFC 0002 B2 (#47)
+gave `test_dashboard_session_scoped_access.py` a second need for it. It came
+here rather than becoming this suite's first test-to-test import: no test
+module in this directory imports from a sibling, and `readable` — which is now
+one line of `access` — is the precedent for where a helper of this shape lives.
+
 `Enrolee`/`enrol_github_client`/`enqueue` and the repo-name constants made the
 same trip when B1 (#24) arrived: `test_dashboard_session_scoped_access.py`
 needs the identical "enrol one client under a specific identity, then call a

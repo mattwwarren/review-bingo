@@ -88,22 +88,21 @@ async def get_scoped_caller(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
 
 
-# Reads only. `PUT /policies/{owner}/{repo}` deliberately does NOT resolve
-# through this dependency: it keeps going through api/policies.py's RepoAdminDep
-# -> authorize_policy_write -> _resolve_caller_client, which accepts a
-# registered client's credential and nothing else.
+# Reads, plus one write. `PUT /policies/{owner}/{repo}` resolves its caller
+# through `resolve_scoped_caller` too — the same function this dependency wraps
+# — since RFC 0002 B2 (#47) made the dashboard the place a repo owner sets the
+# model floor. An earlier posture kept that endpoint on a client-only resolver;
+# the comment here argued for it, and this replaces that argument rather than
+# quietly outliving it.
 #
-# The distinction is worth a sentence because it is invisible at the call site.
-# Unifying "which bearer token authenticates a read" is a safe and useful
-# widening — the two callers resolve to the same GitHub identity and are scoped
-# by the same access set. Applying the same reasoning to a *write* would not be:
-# a dashboard session is a browser tab someone left open, and repo policy is the
-# one knob that decides which models may review a repo's code. Swapping
-# ScopedCallerDep onto that endpoint out of habit would widen who can lower a
-# model floor, and nothing at the call site would look wrong.
-#
-# So the swap is deliberately made to cost something: it requires deleting this
-# comment first.
+# What keeps the write safe is not a narrower resolver, then, but the check
+# behind it: `authorize_policy_write` demands GitHub-recorded `admin` on that
+# specific repo, applied identically to whichever identity resolved. A browser
+# session buys no permission a grid client under the same account would not
+# already have. `test_policy_authorization.py` and
+# `test_dashboard_session_scoped_access.py` pin both halves — admin writes,
+# non-admin gets 403 — so a future relaxation of the check fails a test rather
+# than passing quietly under a comment nobody reads.
 ScopedCallerDep = Annotated[ScopedCaller, Depends(get_scoped_caller)]
 
 

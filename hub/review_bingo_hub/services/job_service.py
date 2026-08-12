@@ -144,6 +144,63 @@ async def reclaim_expired_leases(session: AsyncSession) -> int:
     return requeued.rowcount or 0
 
 
+async def release_leased_jobs_for_client(session: AsyncSession, client_id: UUID) -> int:
+    """Requeue (or exhaust) every job this client currently holds a lease on.
+
+    The revocation counterpart to `reclaim_expired_leases`: the identical
+    two-step transition, keyed on `leased_by` instead of an expired clock,
+    because a revoked client's lease must not wait out its TTL. "This machine
+    is gone" is a present-tense claim, and answering it by letting the queue
+    sit on work nobody is doing until `LEASE_TTL_SECONDS` elapses answers it in
+    the future tense.
+
+    Still exhausts a job that is out of attempts rather than requeueing
+    unconditionally, for the same reason the expiry path does: a client that
+    revokes itself mid-round must not reset the attempt budget, or a job that
+    can never succeed gets dispatched forever.
+
+    Must run *before* the client row is deleted. `review_job.leased_by` is
+    ON DELETE SET NULL, so once the delete lands there is nothing left to
+    filter on and the lease is orphaned in the LEASED state instead.
+    """
+    requeued = await session.execute(
+        update(ReviewJob)
+        .where(col(ReviewJob.state) == JobState.LEASED.value)
+        .where(col(ReviewJob.leased_by) == client_id)
+        .where(col(ReviewJob.attempts) < col(ReviewJob.max_attempts))
+        .values(state=JobState.QUEUED.value, leased_by=None, lease_expires_at=None)
+    )
+    await session.execute(
+        update(ReviewJob)
+        .where(col(ReviewJob.state) == JobState.LEASED.value)
+        .where(col(ReviewJob.leased_by) == client_id)
+        .values(state=JobState.EXHAUSTED.value, leased_by=None, lease_expires_at=None)
+    )
+    return requeued.rowcount or 0
+
+
+async def reported_jobs_for_client(session: AsyncSession, client_id: UUID) -> list[UUID]:
+    """Ids of this client's completed rounds whose `reported_by` a hard delete will null.
+
+    Read-only, and a precursor to deleting the client rather than part of it:
+    `authorize_client_revoke` calls this while the ids are still resolvable and
+    logs them, because `review_job.reported_by` is ON DELETE SET NULL and once
+    the delete runs there is nothing left to find.
+
+    The verdict itself survives — summary, findings, and the posted PR comment
+    all live on the job row, independent of which machine produced them. What
+    is lost is the attribution. That loss is accepted (blocking revocation on
+    review history would contradict self-service revocation), but it is not
+    allowed to be silent.
+    """
+    result = await session.execute(
+        select(ReviewJob.id)
+        .where(col(ReviewJob.reported_by) == client_id)
+        .where(col(ReviewJob.state).in_([JobState.REPORTED.value, JobState.RELAYED.value]))
+    )
+    return list(result.scalars().all())
+
+
 async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJob | None:
     """Hand the oldest eligible queued job to a client.
 

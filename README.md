@@ -46,3 +46,24 @@ naming the job directly) while a frontier client leases that exact job.
    of posting.
 3. Install the App on the repos you want reviewed; set policy floors via
    `PUT /policies/{owner}/{repo}`.
+
+## Retiring a machine
+
+A client retires itself with `DELETE /clients/{client_id}`, authenticated
+either with that client's own token or with a dashboard session signed in as
+the same GitHub account. The row is deleted outright: the token stops working
+immediately, and any round it was holding goes straight back on the queue
+instead of waiting out its lease. Use it the moment a machine is lost,
+compromised, or decommissioned — check-out is a courtesy a *working* client
+sends, and a stolen laptop does not send courtesies.
+
+**Removing someone else's machine is not a hub endpoint.** Revoke their access
+to the repo in GitHub, and their next check-in — or the expiry of their cached
+access, whichever comes first — ends their leasing.
+
+That is a deliberate refusal, not a missing feature. GitHub is already the
+authority on who can reach a repo, and the hub only ever holds a cached, aging
+copy of its answer. A hub-side "kick this person off" button would be a second
+authority over the same question, one that can disagree with GitHub and always
+in the more dangerous direction: still granting what GitHub has revoked. One
+authority, one answer.

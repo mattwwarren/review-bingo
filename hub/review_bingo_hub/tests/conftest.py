@@ -150,6 +150,13 @@ def docker_services(  # noqa: PLR0913, PLR0917 - pytest fixture params can't be 
     lock_file = root_tmp / "docker_startup.lock"
     ready_file = root_tmp / "docker_ready.txt"
     refcount_file = root_tmp / "docker_refcount.txt"
+    # Cleaned up here rather than by `database_url`, which writes it: the file
+    # caches a *host* port, and Compose picks a fresh ephemeral one every `up`.
+    # It is only valid for the lifetime of the container this fixture owns, so
+    # it has to die with that container or the next run on the same machine
+    # connects to a port nothing is listening on any more. CI never noticed
+    # because its /tmp starts empty; a developer's second run always did.
+    port_file = root_tmp / "postgres_port.txt"
 
     # Startup: increment refcount and start Docker if first worker
     with filelock.FileLock(lock_file):
@@ -184,6 +191,7 @@ def docker_services(  # noqa: PLR0913, PLR0917 - pytest fixture params can't be 
             # Clean up marker files for next test run
             ready_file.unlink(missing_ok=True)
             refcount_file.unlink(missing_ok=True)
+            port_file.unlink(missing_ok=True)
 
 
 # =============================================================================

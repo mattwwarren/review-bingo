@@ -59,6 +59,10 @@ async def test_dashboard_serves_policy_panel_markup(client: AsyncClient) -> None
     # against /policies (what is set today); neither fetch is optional.
     assert "/auth/me" in response.text
     assert "/policies" in response.text
+    # /policies pages at 100 server-side by default; the panel must ask for
+    # more than that in one round trip so an admin's own repo never silently
+    # falls off the page and reads as "no policy" (see POLICIES_FETCH_LIMIT).
+    assert "/policies?limit=${POLICIES_FETCH_LIMIT}" in response.text
 
 
 @pytest.mark.asyncio

@@ -446,11 +446,18 @@
   // missing row as experimental-and-enabled, so the editor pre-fills the same
   // thing rather than inventing a blank state the server has no notion of.
   const NO_POLICY = { min_tier: "experimental", enabled: true };
+  // GET /policies pages at 100 by default. Ask for enough to cover any
+  // realistic admin's repo count in one round trip; a response landing
+  // exactly at this cap is treated as possibly truncated rather than
+  // exhaustive (see poll()/renderPolicy below) — an absent row must never be
+  // read as "no policy" when it might just be "not on this page".
+  const POLICIES_FETCH_LIMIT = 1000;
 
   let selectedId = null;
   let latestJobs = [];
   let latestMe = null;
   let latestPolicies = [];
+  let latestPoliciesMaybeTruncated = false;
   let pickedSignature = null;
   let session = null;
   let loginTimer = null;
@@ -536,7 +543,7 @@
         fetch(`${HUB}/jobs`, { headers: authHeaders() }),
         fetch(`${HUB}/clients`, { headers: authHeaders() }),
         fetch(`${HUB}/auth/me`, { headers: authHeaders() }),
-        fetch(`${HUB}/policies`, { headers: authHeaders() }),
+        fetch(`${HUB}/policies?limit=${POLICIES_FETCH_LIMIT}`, { headers: authHeaders() }),
       ]);
       const responses = [jobsRes, clientsRes, meRes, policiesRes];
 
@@ -561,10 +568,14 @@
       latestJobs = jobs;
       latestMe = me;
       latestPolicies = policies;
+      // A response landing exactly at the requested cap could be hiding more
+      // rows behind it — nothing in this array distinguishes that from "this
+      // is really all of them".
+      latestPoliciesMaybeTruncated = policies.length >= POLICIES_FETCH_LIMIT;
       renderCard(jobs);
       renderRoster(clients);
       renderTally(jobs, clients);
-      renderPolicy(latestMe, latestPolicies);
+      renderPolicy(latestMe, latestPolicies, latestPoliciesMaybeTruncated);
 
       // Only redraw the selected panel when that job actually moved.
       const picked = jobs.find((j) => j.id === selectedId);
@@ -783,7 +794,7 @@
      Editability is a rendering decision only. The hub re-checks admin on every
      PUT — this panel deciding wrongly would cost a 403, never a write. */
 
-  function renderPolicy(me, policies) {
+  function renderPolicy(me, policies, policiesMaybeTruncated) {
     const repos = ((me && me.repos) || [])
       .slice()
       .sort((a, b) => a.repo_full_name.localeCompare(b.repo_full_name));
@@ -803,11 +814,20 @@
     repos.forEach((entry, index) => {
       const name = entry.repo_full_name;
       live.add(name);
-      const editable = entry.permission === ADMIN;
+      const hasPolicy = byRepo.has(name);
+      // A repo with no policy row on the hub reads as the defaults dispatch
+      // would apply to it anyway — but only once "no row" is actually known,
+      // not just unfetched. If /policies might have been truncated, an
+      // absent repo is unconfirmed, not confirmed-default, and must never be
+      // rendered as an editable control a Save click could turn into a real,
+      // silently-widened write.
+      const unconfirmed = !hasPolicy && policiesMaybeTruncated;
+      const editable = entry.permission === ADMIN && !unconfirmed;
       let item = policyRowsByRepo.get(name);
-      // Losing (or gaining) admin flips the row between controls and plain
-      // text, which is different DOM. Rebuild on exactly that transition, not
-      // on every poll — the whole point of the keyed update below.
+      // Losing (or gaining) admin — or edit access flipping on the truncation
+      // guard above — flips the row between controls and plain text, which
+      // is different DOM. Rebuild on exactly that transition, not on every
+      // poll — the whole point of the keyed update below.
       if (item && item.dataset.editable !== String(editable)) {
         item.remove();
         item = null;
@@ -816,9 +836,7 @@
         item = buildPolicyRow(name, editable);
         policyRowsByRepo.set(name, item);
       }
-      // A repo with no policy row on the hub reads as the defaults dispatch
-      // would apply to it anyway, not as a blank the server has no notion of.
-      updatePolicyRow(item, entry, byRepo.get(name) || NO_POLICY);
+      updatePolicyRow(item, entry, hasPolicy ? byRepo.get(name) : NO_POLICY, unconfirmed);
       const occupant = el.policy.children[index];
       if (occupant !== item) el.policy.insertBefore(item, occupant || null);
     });
@@ -871,15 +889,19 @@
   }
 
   /* Touch only what changed, so a row nobody is looking at stays still. */
-  function updatePolicyRow(item, entry, policy) {
+  function updatePolicyRow(item, entry, policy, unconfirmed) {
     const perm = item.querySelector(".policy-perm");
     if (perm.textContent !== entry.permission) perm.textContent = entry.permission;
 
     if (item.dataset.editable !== "true") {
       const tier = item.querySelector(".policy-tier-fact");
       const enabled = item.querySelector(".policy-enabled-fact");
-      const enabledText = policy.enabled ? "dispatching" : "paused";
-      if (tier.textContent !== policy.min_tier) tier.textContent = policy.min_tier;
+      // Unconfirmed means /policies may have paginated this repo out, not
+      // that a policy is genuinely absent — say so rather than stating the
+      // default as if it were read.
+      const tierText = unconfirmed ? "unconfirmed" : policy.min_tier;
+      const enabledText = unconfirmed ? "unconfirmed" : (policy.enabled ? "dispatching" : "paused");
+      if (tier.textContent !== tierText) tier.textContent = tierText;
       if (enabled.textContent !== enabledText) enabled.textContent = enabledText;
       return;
     }
@@ -936,7 +958,7 @@
       }
       delete item.dataset.dirty;
       recordPolicy(body);
-      renderPolicy(latestMe, latestPolicies);
+      renderPolicy(latestMe, latestPolicies, latestPoliciesMaybeTruncated);
       setRowStatus(item, "Saved", "saved");
     } catch {
       setRowStatus(item, "Could not reach the hub to save.", "error");

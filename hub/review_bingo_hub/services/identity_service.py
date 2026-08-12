@@ -406,6 +406,13 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
     narrowness was RFC 0001's read-only-dashboard posture, not a property of
     the invariant.
 
+    `resolve_scoped_caller` tries the dashboard-session table first, so a
+    grid-client token — the only credential kind this path saw before B2 —
+    now costs one extra indexed lookup (a miss on sessions, then a hit on
+    clients) instead of going straight to the client table. Negligible here:
+    unlike the poll-driven reads that share this resolver, a policy write is
+    a low-frequency, button-click path.
+
     Raises:
         PolicyCallerUnauthenticatedError: credential resolves to nobody (401).
         PolicyWriteForbiddenError: caller is known but not a repo admin (403).

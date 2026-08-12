@@ -341,11 +341,15 @@ class RecordingHub:
         self,
         *,
         leases: list[httpx.Response] | None = None,
+        check_in_responses: list[httpx.Response] | None = None,
         ttl_seconds: int = 8 * 60 * 60,
         clock: FakeClock | None = None,
         seconds_per_round: float = 0.0,
     ) -> None:
         self.leases = leases if leases is not None else []
+        # Scripted check-in responses, popped like `leases`; empty means the
+        # default healthy 200 — existing tests keep their behavior untouched.
+        self.check_in_responses = check_in_responses if check_in_responses is not None else []
         self.ttl_seconds = ttl_seconds
         self.clock = clock
         self.seconds_per_round = seconds_per_round
@@ -357,6 +361,8 @@ class RecordingHub:
         self.paths.append(path)
         if path == "/clients/check-in":
             self.check_in_bodies.append(json.loads(request.content) if request.content else None)
+            if self.check_in_responses:
+                return self.check_in_responses.pop(0)
             return httpx.Response(
                 200,
                 json={"status": "checked_in", "identity_access_ttl_seconds": self.ttl_seconds},
@@ -577,7 +583,8 @@ def test_cmd_login_no_store_flag_persists_nothing_from_github(
     bingo_client.cmd_login(args)
 
     state = json.loads(args.state.read_text())
-    assert set(state) == {"hub_url", "token"}
+    assert set(state) == {"hub_url", "token", bingo_client.STORE_GITHUB_TOKEN_KEY}
+    assert state[bingo_client.STORE_GITHUB_TOKEN_KEY] == bingo_client.STORE_GITHUB_TOKEN_OPTED_OUT
     captured = capsys.readouterr()
     notice = captured.out + captured.err
     assert "--no-store-github-token" in notice
@@ -608,6 +615,49 @@ def test_cmd_check_in_reattest_persists_the_refreshed_token_set(
     state = json.loads(state_path.read_text())
     assert state["github_access_token"] == REATTESTED_ACCESS
     assert state["github_refresh_token"] == REATTESTED_REFRESH
+
+
+def test_cmd_check_in_reattest_honors_the_durable_opt_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An opted-out client re-attests in-memory; its choice survives `--reattest`.
+
+    The regression this guards: the opt-out living only in `login`'s argv, so
+    the very cadence an attended operator is told to run silently reversed it.
+    """
+    state_path = write_state(tmp_path, enrolled_state(store_github_token=bingo_client.STORE_GITHUB_TOKEN_OPTED_OUT))
+    tokens = bingo_client.GithubTokenSet(access_token=REATTESTED_ACCESS, refresh_token=REATTESTED_REFRESH)
+    monkeypatch.setattr(bingo_client, "device_flow_login", lambda *a, **k: tokens)
+    hub = RecordingHub()
+    monkeypatch.setattr(bingo_client, "api", lambda state: hub.client())
+    args = bingo_client.build_parser().parse_args(
+        ["check-in", "--reattest", "--client-id", "Iv23liCLIENTID", "--state", str(state_path)]
+    )
+
+    bingo_client.cmd_check_in(args)
+
+    assert hub.check_in_bodies == [{"github_token": REATTESTED_ACCESS}]
+    state = json.loads(state_path.read_text())
+    assert state[bingo_client.STORE_GITHUB_TOKEN_KEY] == bingo_client.STORE_GITHUB_TOKEN_OPTED_OUT
+    assert not any(key in state for key in bingo_client.GITHUB_TOKEN_STATE_KEYS)
+    assert "--no-store-github-token" in capsys.readouterr().out
+
+
+def test_persist_github_tokens_removes_strays_from_opted_out_state(tmp_path: Path) -> None:
+    """The opted-out invariant self-heals: strays are swept, nothing new lands."""
+    state = enrolled_state(
+        store_github_token=bingo_client.STORE_GITHUB_TOKEN_OPTED_OUT, github_access_token=STALE_ACCESS
+    )
+    state_path = write_state(tmp_path, state)
+    tokens = bingo_client.GithubTokenSet(access_token=REATTESTED_ACCESS)
+
+    bingo_client._persist_github_tokens(state, state_path, tokens)
+
+    stored = json.loads(state_path.read_text())
+    assert not any(key in stored for key in bingo_client.GITHUB_TOKEN_STATE_KEYS)
+    assert stored[bingo_client.STORE_GITHUB_TOKEN_KEY] == bingo_client.STORE_GITHUB_TOKEN_OPTED_OUT
 
 
 # --- picking a usable credential without asking anybody -------------------
@@ -871,6 +921,46 @@ def test_run_loop_treats_a_first_409_as_check_in_before_leasing(tmp_path: Path) 
 
     assert hub.check_in_bodies == [None]
     assert hub.leases_served == 2
+
+
+def test_run_loop_survives_a_hub_error_during_conflict_recovery(tmp_path: Path) -> None:
+    """Transient hub weather inside recovery idles the loop; it must never kill it.
+
+    The 409 puts the loop into `_recover_from_lease_conflict`, whose own
+    check-in then 500s. That is the same transient class the proactive branch
+    already tolerates — the loop logs, idles, and recovers on the next round.
+    Only `SystemExit` (the genuinely-unrenewable path) may end the process.
+    """
+    state = enrolled_state()
+    state_path = write_state(tmp_path, state)
+    hub = RecordingHub(
+        leases=[
+            httpx.Response(409, json={"detail": "Check in before leasing"}),
+            httpx.Response(409, json={"detail": "Check in before leasing"}),
+            httpx.Response(200, json=leased_job()),
+        ],
+        check_in_responses=[httpx.Response(500, json={"detail": "hub mid-deploy"})],
+    )
+    sleeps = RecordingSleep()
+
+    with hub.client() as hub_client, http_with(forbidden_github) as github:
+        bingo_client.run_loop(
+            hub_client,
+            state,
+            state_path,
+            loop_args(tmp_path),
+            idle_seconds=1,
+            sleep=sleeps,
+            now=FakeClock(),
+            github_http=github,
+            max_rounds=3,
+        )
+
+    # Round 1: 409 -> recovery check-in 500s -> logged, idled. Round 2: 409 ->
+    # recovery heartbeat succeeds, immediate retry. Round 3: lease succeeds.
+    assert hub.check_ins == 2
+    assert hub.leases_served == 3
+    assert len(sleeps.waits) == 1
 
 
 def test_run_loop_never_reattests_proactively_without_a_stored_token(tmp_path: Path) -> None:

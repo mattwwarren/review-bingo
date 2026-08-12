@@ -137,10 +137,14 @@ uv run client/bingo_client.py login --no-store-github-token [...]
 ```
 
 Spends the token on enrolment and stores nothing, exactly as this client behaved
-before. The tradeoff is stated plainly because it is real: an opted-out client
-**cannot renew unattended**, so keeping it attested becomes a manual `login`
-cadence you own. (`check-in --reattest` stores what it obtains either way — it
-just ran a device flow you were present for.)
+before. The choice is durable: it writes a `store_github_token: "false"` marker
+into the state file, and every later persistence path honors it — a
+`check-in --reattest` on an opted-out client still re-attests with the hub, but
+the token is spent in-memory and discarded, never written to disk. The tradeoff
+is stated plainly because it is real: an opted-out client **cannot renew
+unattended**, so keeping it attested becomes a manual `login` or
+`check-in --reattest` cadence you own. Re-run `login` without the flag to opt
+back in.
 
 ### When `loop` gives up
 

@@ -93,6 +93,21 @@ GITHUB_TOKEN_STATE_KEYS = (
     "github_access_token_expires_at",
     "github_refresh_token_expires_at",
 )
+# The one key whose presence means "this client stored GitHub credentials".
+PRIMARY_TOKEN_KEY = GITHUB_TOKEN_STATE_KEYS[0]
+
+# Durable opt-out, written by `login --no-store-github-token`. Absent means
+# "store" — state files from before the marker existed keep their behavior.
+# Lives in state rather than in argv so every later persistence path
+# (`check-in --reattest`, `loop` renewals) honors the enrolment-time choice
+# without each command needing its own flag.
+STORE_GITHUB_TOKEN_KEY = "store_github_token"  # noqa: S105 - marker name, not a credential
+STORE_GITHUB_TOKEN_OPTED_OUT = "false"  # noqa: S105 - marker value, not a credential
+
+
+def _github_storage_opted_out(state: dict[str, str]) -> bool:
+    return state.get(STORE_GITHUB_TOKEN_KEY) == STORE_GITHUB_TOKEN_OPTED_OUT
+
 
 ATTENDED_ONLY_NOTICE = (
     "--no-store-github-token: nothing GitHub issued was written to disk. `loop` "
@@ -171,25 +186,26 @@ class GithubTokenSet:
     @classmethod
     def from_state(cls, state: dict[str, str]) -> GithubTokenSet | None:
         """The stored credentials, or None for a client that never stored any."""
-        access_token = state.get("github_access_token")
+        access_key, refresh_key, access_expiry_key, refresh_expiry_key = GITHUB_TOKEN_STATE_KEYS
+        access_token = state.get(access_key)
         if not access_token:
             return None
         return cls(
             access_token=access_token,
-            refresh_token=state.get("github_refresh_token"),
-            access_token_expires_at=_parse_expiry(state.get("github_access_token_expires_at")),
-            refresh_token_expires_at=_parse_expiry(state.get("github_refresh_token_expires_at")),
+            refresh_token=state.get(refresh_key),
+            access_token_expires_at=_parse_expiry(state.get(access_expiry_key)),
+            refresh_token_expires_at=_parse_expiry(state.get(refresh_expiry_key)),
         )
 
     def as_state_fields(self) -> dict[str, str]:
         """Flat state-file keys, omitted rather than null when GitHub sent nothing."""
-        fields: dict[str, str | None] = {
-            "github_access_token": self.access_token,
-            "github_refresh_token": self.refresh_token,
-            "github_access_token_expires_at": _iso(self.access_token_expires_at),
-            "github_refresh_token_expires_at": _iso(self.refresh_token_expires_at),
-        }
-        return {key: value for key, value in fields.items() if value is not None}
+        values = (
+            self.access_token,
+            self.refresh_token,
+            _iso(self.access_token_expires_at),
+            _iso(self.refresh_token_expires_at),
+        )
+        return {key: value for key, value in zip(GITHUB_TOKEN_STATE_KEYS, values, strict=True) if value is not None}
 
 
 def load_state(path: Path) -> dict[str, str]:
@@ -418,10 +434,16 @@ def _persist_github_tokens(state: dict[str, str], path: Path, tokens: GithubToke
     Cleared before updating rather than merged over: a refreshed set that no
     longer carries a refresh token must not leave the previous one behind on
     disk, still readable and no longer good for anything.
+
+    The durable opt-out is honored here, centrally, so every caller inherits
+    it: opted-out state never gains credentials, and any strays are removed —
+    the "opted-out state holds no GitHub credential" invariant self-heals
+    rather than trusting every past writer to have got it right.
     """
     for key in GITHUB_TOKEN_STATE_KEYS:
         state.pop(key, None)
-    state.update(tokens.as_state_fields())
+    if not _github_storage_opted_out(state):
+        state.update(tokens.as_state_fields())
     save_state(path, state)
 
 
@@ -486,6 +508,7 @@ def cmd_login(args: argparse.Namespace) -> None:
     state = {"hub_url": args.hub.rstrip("/"), "token": body["token"]}
 
     if args.no_store_github_token:
+        state[STORE_GITHUB_TOKEN_KEY] = STORE_GITHUB_TOKEN_OPTED_OUT
         print(ATTENDED_ONLY_NOTICE)
     else:
         state.update(tokens.as_state_fields())
@@ -524,9 +547,16 @@ def cmd_check_in(args: argparse.Namespace) -> None:
         print("Checked in — plugged into the grid.")
         return
     # Stored only once the hub accepted them: a token it refused is not one
-    # `loop` should later find on disk and spend again.
+    # `loop` should later find on disk and spend again. (For an opted-out
+    # client the persist is a self-healing no-op — the token was spent
+    # in-memory and the notice says so, rather than a success message
+    # implying credentials this client deliberately does not keep.)
     _persist_github_tokens(state, args.state, tokens)
-    print("Checked in — plugged into the grid, repo access re-attested.")
+    if _github_storage_opted_out(state):
+        print("Checked in — repo access re-attested.")
+        print(ATTENDED_ONLY_NOTICE)
+    else:
+        print("Checked in — plugged into the grid, repo access re-attested.")
 
 
 def cmd_check_out(args: argparse.Namespace) -> None:
@@ -684,7 +714,7 @@ def run_loop(  # noqa: PLR0913 - every knob here is a seam a test drives; see th
     # client whose renewals keep failing backs off rather than hammering GitHub.
     attempted_at: datetime | None = None
     ttl_seconds: int | None = None
-    renewable = "github_access_token" in state
+    renewable = PRIMARY_TOKEN_KEY in state
 
     for _round in _rounds(max_rounds):
         if renewable and _reattestation_is_due(attempted_at, ttl_seconds, now):
@@ -707,21 +737,31 @@ def run_loop(  # noqa: PLR0913 - every knob here is a seam a test drives; see th
                 print(f"hub error: {exc}", file=sys.stderr)
                 worked = False
             else:
-                ttl_seconds = _recover_from_lease_conflict(
-                    hub_client,
-                    state,
-                    state_path,
-                    args,
-                    checked_in_this_run=checked_in_this_run,
-                    ttl_seconds=ttl_seconds,
-                    github_http=github_http,
-                    now=now,
-                )
-                checked_in_this_run = True
-                attempted_at = now()
-                # Recovered, so retry immediately rather than idling on a
-                # conflict that has just been answered.
-                worked = True
+                try:
+                    ttl_seconds = _recover_from_lease_conflict(
+                        hub_client,
+                        state,
+                        state_path,
+                        args,
+                        checked_in_this_run=checked_in_this_run,
+                        ttl_seconds=ttl_seconds,
+                        github_http=github_http,
+                        now=now,
+                    )
+                except httpx.HTTPStatusError as recovery_exc:
+                    # Recovery's own check-in can hit the same transient hub
+                    # weather as anything else; that must idle, not kill an
+                    # unattended process. The genuinely-unrecoverable case
+                    # exits via SystemExit inside the recovery, which this
+                    # deliberately does not catch.
+                    print(f"hub error during conflict recovery: {recovery_exc}", file=sys.stderr)
+                    worked = False
+                else:
+                    checked_in_this_run = True
+                    attempted_at = now()
+                    # Recovered, so retry immediately rather than idling on a
+                    # conflict that has just been answered.
+                    worked = True
 
         if not worked:
             sleep(idle_seconds)

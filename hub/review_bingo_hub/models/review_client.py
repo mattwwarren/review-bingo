@@ -136,6 +136,28 @@ class ReviewClientRead(ReviewClientBase):
     model_config: ClassVar[ConfigDict] = ConfigDict(from_attributes=True)  # type: ignore[assignment]
 
 
+class ReviewClientCheckInRead(ReviewClientRead):
+    """Check-in's response: the client, plus how long its attestation is good for.
+
+    Deliberately a check-in-only subclass rather than a field on the shared
+    ReviewClientRead. The TTL answers "when should I come back", and check-in's
+    caller is the only one asking: a client that must stay attested unattended
+    needs a cadence, and the only honest source of one is the hub that enforces
+    the deadline. Registration and the dashboard roster gain nothing from it —
+    on the roster it would be the same configured number repeated once per row.
+
+    Widening the shared model later is trivial if a real consumer appears;
+    un-widening it after a dashboard starts reading it is not.
+    """
+
+    identity_access_ttl_seconds: int = Field(
+        description=(
+            "How long, in seconds, a fresh attestation stays valid for leasing. Clients that "
+            "re-attest unattended schedule off this rather than hardcoding the hub's TTL"
+        )
+    )
+
+
 class ReviewClientRegistered(SQLModel):
     """Registration response: the one and only time the token is shown."""
 

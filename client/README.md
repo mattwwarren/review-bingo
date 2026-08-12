@@ -92,6 +92,73 @@ sit waiting for a code nobody is there to type. Two ways it can be refused:
   set. A GitHub incident should not take the grid offline for its duration; the
   snapshot simply expires on its original schedule.
 
+## Staying attested unattended
+
+`check-in --reattest` is the attended answer: someone is there to type a code.
+`loop` renews itself instead. Each check-in response tells it how long an
+attestation is good for, and it re-attests at half that interval — the cadence
+comes from the hub, never from a number hardcoded here.
+
+To renew across the TTL, `loop` needs a credential it can spend on its own. So
+`login` now **stores what GitHub issued** in the same state file, still `0600`,
+still client-side only:
+
+```
+github_access_token, github_refresh_token,
+github_access_token_expires_at, github_refresh_token_expires_at
+```
+
+**This is a real change in blast radius, not a wash.** Until now, the only
+credential surviving process exit was the hub-minted bearer token — revocable by
+the hub and worthless anywhere else. A stored `github_refresh_token` is a live
+GitHub credential that can mint fresh access on its own, without the hub, for as
+long as GitHub's refresh lifetime allows. Three things bound it, and they are
+the reason this is the default:
+
+- **Scope is `read:user` only** — no repo access, no write, no admin.
+- **Revocation is instant** — revoke the App authorization in your GitHub
+  settings, or just re-run `login`, which overwrites what is stored.
+- **The hub still never sees it.** Enrolment and check-in transmit one opaque
+  access token per call, exactly as before, and nothing is persisted hub-side.
+
+### The App setting this depends on
+
+Refresh tokens only exist if whoever runs the hub ticked **"Expire user
+authorization tokens"** on the GitHub App. With it off, GitHub issues an access
+token that never expires and no refresh token at all. `login` says so once, on
+stderr, and `loop` then keeps re-presenting that one token indefinitely — which
+works, but nothing can replace it if it is ever revoked, so a manual `login` is
+your recovery.
+
+### Opting out
+
+```
+uv run client/bingo_client.py login --no-store-github-token [...]
+```
+
+Spends the token on enrolment and stores nothing, exactly as this client behaved
+before. The choice is durable: it writes a `store_github_token: "false"` marker
+into the state file, and every later persistence path honors it — a
+`check-in --reattest` on an opted-out client still re-attests with the hub, but
+the token is spent in-memory and discarded, never written to disk. The tradeoff
+is stated plainly because it is real: an opted-out client **cannot renew
+unattended**, so keeping it attested becomes a manual `login` or
+`check-in --reattest` cadence you own. Re-run `login` without the flag to opt
+back in.
+
+### When `loop` gives up
+
+A 409 while leasing before the loop's first check-in just means "check in first",
+and `loop` answers it with a heartbeat and carries on. A 409 *after* it has
+checked in is a genuinely expired attestation, and if nothing on disk can renew
+it, `loop` exits saying so rather than retrying a refusal that will not change
+its mind:
+
+```
+Cached GitHub access expired and nothing here can renew it — run
+`bingo_client.py login` to re-authorize this client.
+```
+
 ## Bring your own reviewer
 
 The hub never sees your prompts or review config. Set `REVIEW_CMD` to any
@@ -107,8 +174,9 @@ two-model loop — your compute, your call. Without `REVIEW_CMD` the client
 submits a clearly-labelled canned report so the loop can be exercised
 offline (that's what `scripts/demo.sh` does).
 
-Registration state (hub URL + bearer token) lands in
-`~/.config/review-bingo/client.json` (`--state` to override).
+Registration state (hub URL + bearer token, plus the GitHub credentials unless
+you passed `--no-store-github-token`) lands in
+`~/.config/review-bingo/client.json`, mode `0600` (`--state` to override).
 
 ## Development
 

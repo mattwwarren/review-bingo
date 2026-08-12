@@ -510,12 +510,12 @@ def cmd_login(args: argparse.Namespace) -> None:
     if args.no_store_github_token:
         state[STORE_GITHUB_TOKEN_KEY] = STORE_GITHUB_TOKEN_OPTED_OUT
         print(ATTENDED_ONLY_NOTICE)
-    else:
-        state.update(tokens.as_state_fields())
-        if tokens.refresh_token is None:
-            print(NO_UNATTENDED_RENEWAL_WARNING, file=sys.stderr)
+    elif tokens.refresh_token is None:
+        print(NO_UNATTENDED_RENEWAL_WARNING, file=sys.stderr)
 
-    save_state(args.state, state)
+    # Routed through the same centralized persist path check-in/loop use, so
+    # the opt-out marker is honored from one place rather than re-decided here.
+    _persist_github_tokens(state, args.state, tokens)
     print(f"Enrolled {args.name} ({body['client']['id']}); token stored in {args.state}")
 
 

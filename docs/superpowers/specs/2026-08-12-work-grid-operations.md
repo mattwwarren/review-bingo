@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-12
 **Status:** approved design
-**Milestone:** (filled at buildout)
-**Issues:** (filled at buildout)
+**Milestone:** [v0.2.0](https://github.com/mattwwarren/review-bingo/milestone/3)
+**Issues:** epics I #41, II #42 · tickets A1 #43, A2 #44, A3 #45, B1 #46, B2 #47, B3 #48 · pulled in #38 · supersedes #35 (closed by A1)
 **Builds on:** [RFC 0001](2026-08-07-github-identity-grid-design.md) — the
 invariant ("the hub is never a privilege escalation over GitHub") and every
 decision there stand unmodified.

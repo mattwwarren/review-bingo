@@ -26,10 +26,11 @@ access from it once, and discards it.
 
 Usage:
     bingo_client.py login     --hub URL --name NAME --model MODEL --provider P [--client-id ID]
+                              [--no-store-github-token]
     bingo_client.py register  --hub URL --name NAME --model MODEL --provider P --enrolment-token TOKEN
     bingo_client.py check-in  [--state PATH] [--reattest [--client-id ID]]
     bingo_client.py run-once  [--state PATH]      # lease → review → report (one round)
-    bingo_client.py loop      [--state PATH] [--idle-seconds N]
+    bingo_client.py loop      [--state PATH] [--idle-seconds N] [--client-id ID]
     bingo_client.py check-out [--state PATH]
 
 `login` is the normal path. `register` is the same call with the credential

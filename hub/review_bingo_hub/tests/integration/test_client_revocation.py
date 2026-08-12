@@ -211,23 +211,35 @@ async def test_revoke_nonexistent_client_returns_404_indistinguishably_and_still
     missing_id = uuid4()
 
     with caplog.at_level(logging.DEBUG):
+        caplog.clear()
         never_existed = await client.delete(f"/clients/{missing_id}", headers=mine)
-    real_but_forbidden = await client.delete(f"/clients/{theirs_id}", headers=mine)
+        real_but_forbidden = await client.delete(f"/clients/{theirs_id}", headers=mine)
 
     assert never_existed.status_code == HTTPStatus.NOT_FOUND
     assert never_existed.status_code == real_but_forbidden.status_code
     assert never_existed.json() == real_but_forbidden.json()
     assert never_existed.json() == {"detail": NOT_FOUND_DETAIL}
 
+    # Two identical responses, two *distinguishable* log records: that pairing
+    # is the whole rule, so both halves are asserted from the same two calls.
     denied = records_named(caplog, "client_revoke_denied")
-    assert len(denied) == 1
-    assert denied[0].__dict__["reason"] == "client_not_found"
-    assert denied[0].__dict__["target_client_id"] == str(missing_id)
-    assert denied[0].__dict__["github_login"] == "prober"
-    assert denied[0].__dict__["github_user_id"] == 1
+    assert len(denied) == 2
+    by_reason = {record.__dict__["reason"]: record for record in denied}
+    assert set(by_reason) == {"client_not_found", "client_wrong_identity"}
+
+    missing = by_reason["client_not_found"]
+    assert missing.__dict__["target_client_id"] == str(missing_id)
+    assert missing.__dict__["github_login"] == "prober"
+    assert missing.__dict__["github_user_id"] == 1
     # Nothing was found, so there is nothing to name. An empty or invented name
     # would read as a real client whose name happens to be blank.
-    assert "target_client_name" not in denied[0].__dict__
+    assert "target_client_name" not in missing.__dict__
+
+    # The refusal that *did* find a row names it — the operator needs to know
+    # whose machine someone just tried to unplug.
+    forbidden = by_reason["client_wrong_identity"]
+    assert forbidden.__dict__["target_client_id"] == theirs_id
+    assert forbidden.__dict__["target_client_name"] == "theirs"
 
 
 async def test_missing_credential_returns_401(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,6 +421,9 @@ async def test_dev_mode_secret_revokes_any_client(
     client_id, _ = await register_dev_client(client, "dev-box")
 
     with caplog.at_level(logging.DEBUG):
+        # Registration above spent the same secret and logged its own
+        # `dev_mode_secret_used`; clearing scopes the counts below to the revoke.
+        caplog.clear()
         response = await client.delete(f"/clients/{client_id}", headers=enrolment_headers(DEV_SECRET))
 
     assert response.status_code == HTTPStatus.NO_CONTENT

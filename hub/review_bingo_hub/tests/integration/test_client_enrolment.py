@@ -695,3 +695,74 @@ async def test_check_in_links_identity_for_a_github_mode_client_with_no_identity
     assert identity.github_user_id == 20482231
     assert response.json()["identity_id"] == str(identity.id)
     assert await access_snapshot(session) == {(PAYMENTS, PermissionLevel.READ)}
+
+
+# ---------------------------------------------------------------------------
+# Check-in tells the caller how long its attestation is good for
+# ---------------------------------------------------------------------------
+#
+# A client that must stay attested unattended needs a cadence, and the only
+# honest source of one is the hub that enforces the TTL. Publishing it on the
+# check-in response — the call a client already makes to re-attest — means the
+# client never has to hardcode a guess that a later IDENTITY_ACCESS_TTL_SECONDS
+# change would silently invalidate.
+
+
+async def test_check_in_response_carries_the_access_ttl(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both check-in shapes carry it: the field is Settings-derived, not reattest-derived."""
+    fake = FakeGithubIdentityService()
+    use_github_mode(monkeypatch, fake)
+    headers = await enrol(client, fake, [PAYMENTS])
+
+    heartbeat = await client.post("/clients/check-in", headers=headers)
+    reattest = await client.post("/clients/check-in", json={"github_token": GITHUB_TOKEN}, headers=headers)
+
+    assert heartbeat.status_code == HTTPStatus.OK
+    assert reattest.status_code == HTTPStatus.OK
+    assert heartbeat.json()["identity_access_ttl_seconds"] == settings.identity_access_ttl_seconds
+    assert reattest.json()["identity_access_ttl_seconds"] == settings.identity_access_ttl_seconds
+
+
+async def test_check_in_access_ttl_follows_the_configured_value(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reported, not hardcoded — a hub tuned to a shorter TTL says so."""
+    fake = FakeGithubIdentityService()
+    use_github_mode(monkeypatch, fake)
+    headers = await enrol(client, fake, [PAYMENTS])
+    monkeypatch.setattr(settings, "identity_access_ttl_seconds", 900)
+
+    response = await client.post("/clients/check-in", headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["identity_access_ttl_seconds"] == 900
+
+
+async def test_only_check_in_gained_the_ttl_field(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration and the roster keep the shared client schema they had.
+
+    The TTL is an answer to "when should I come back", which is a question only
+    check-in's caller is asking. Widening ReviewClientRead would put it on the
+    dashboard roster too, where it is the same number repeated per row. This
+    pins the narrow footprint so a later change has to argue with a test.
+    """
+    fake = FakeGithubIdentityService()
+    use_github_mode(monkeypatch, fake)
+    fake.identity = marge()
+    fake.repo_access = [readable(PAYMENTS)]
+
+    registered = await client.post("/clients", json=REGISTRATION_PAYLOAD, headers=enrolment_headers(GITHUB_TOKEN))
+    assert registered.status_code == HTTPStatus.CREATED
+    headers = enrolment_headers(registered.json()["token"])
+    roster = await client.get("/clients", headers=headers)
+
+    assert "identity_access_ttl_seconds" not in registered.json()["client"]
+    assert roster.status_code == HTTPStatus.OK
+    assert all("identity_access_ttl_seconds" not in entry for entry in roster.json())

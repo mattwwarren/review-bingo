@@ -249,6 +249,18 @@ GITHUB_EPOCH = datetime(2026, 8, 12, 9, 0, tzinfo=UTC)
 ACCESS_TOKEN_LIFETIME = 28800
 REFRESH_TOKEN_LIFETIME = 15811200
 
+# Named rather than inlined so each one says which *role* it plays in a
+# scenario — and so the literals stop tripping the hardcoded-credential lint on
+# every assertion that mentions a token-shaped state key.
+REFRESHED_ACCESS = "ghu_expiringtoken"
+ISSUED_REFRESH = "ghr_refreshtoken"
+STALE_ACCESS = "ghu_stale"
+STORED_REFRESH = "ghr_oldrefresh"
+NON_EXPIRING_ACCESS = "gho_nonexpiring"
+VALID_ACCESS = "ghu_stillgood"
+REATTESTED_ACCESS = "ghu_freshtoken"
+REATTESTED_REFRESH = "ghr_freshrefresh"
+
 
 class FakeClock:
     """Hand-advanced stand-in for `datetime.now(UTC)`.
@@ -267,6 +279,11 @@ class FakeClock:
         self.now += timedelta(seconds=seconds)
 
 
+def expiry_iso(clock: FakeClock, lifetime: int) -> str:
+    """The stored expiry the client should derive from a `*_expires_in` of `lifetime`."""
+    return (clock() + timedelta(seconds=lifetime)).isoformat()
+
+
 def expiring_token_grant(**overrides: Any) -> dict[str, Any]:
     """GitHub's success body when "Expire user authorization tokens" is ON.
 
@@ -278,9 +295,9 @@ def expiring_token_grant(**overrides: Any) -> dict[str, Any]:
     happens to want.
     """
     body: dict[str, Any] = {
-        "access_token": "ghu_expiringtoken",
+        "access_token": REFRESHED_ACCESS,
         "expires_in": ACCESS_TOKEN_LIFETIME,
-        "refresh_token": "ghr_refreshtoken",
+        "refresh_token": ISSUED_REFRESH,
         "refresh_token_expires_in": REFRESH_TOKEN_LIFETIME,
         "scope": "",
         "token_type": "bearer",
@@ -296,7 +313,7 @@ def bare_token_grant() -> dict[str, Any]:
     null — which is exactly the distinction the client has to survive, since it
     is what decides whether unattended renewal is possible at all.
     """
-    return {"access_token": "gho_nonexpiring", "token_type": "bearer", "scope": ""}
+    return {"access_token": NON_EXPIRING_ACCESS, "token_type": "bearer", "scope": ""}
 
 
 def leased_job(job_id: str = "job-1") -> dict[str, Any]:
@@ -421,8 +438,8 @@ def test_device_flow_login_returns_the_whole_token_set() -> None:
             "Iv23liCLIENTID", http=http, sleep=RecordingSleep(), echo=lambda _: None, now=clock
         )
 
-    assert tokens.access_token == "ghu_expiringtoken"  # noqa: S105 - fixture value
-    assert tokens.refresh_token == "ghr_refreshtoken"  # noqa: S105 - fixture value
+    assert tokens.access_token == REFRESHED_ACCESS
+    assert tokens.refresh_token == ISSUED_REFRESH
     assert tokens.access_token_expires_at == GITHUB_EPOCH + timedelta(seconds=ACCESS_TOKEN_LIFETIME)
     assert tokens.refresh_token_expires_at == GITHUB_EPOCH + timedelta(seconds=REFRESH_TOKEN_LIFETIME)
 
@@ -438,7 +455,7 @@ def test_device_flow_login_token_set_is_bare_when_expiry_is_disabled() -> None:
             "Iv23liCLIENTID", http=http, sleep=RecordingSleep(), echo=lambda _: None, now=FakeClock()
         )
 
-    assert tokens.access_token == "gho_nonexpiring"  # noqa: S105 - fixture value
+    assert tokens.access_token == NON_EXPIRING_ACCESS
     assert tokens.refresh_token is None
     assert tokens.access_token_expires_at is None
     assert tokens.refresh_token_expires_at is None
@@ -462,16 +479,16 @@ def test_refresh_access_token_sends_the_documented_grant_and_no_client_secret() 
 
     clock = FakeClock()
     with http_with(handler) as http:
-        tokens = bingo_client.refresh_access_token("Iv23liCLIENTID", "ghr_oldrefresh", http=http, now=clock)
+        tokens = bingo_client.refresh_access_token("Iv23liCLIENTID", STORED_REFRESH, http=http, now=clock)
 
     assert seen["url"] == bingo_client.GITHUB_ACCESS_TOKEN_URL
     assert seen["body"] == {
         "client_id": "Iv23liCLIENTID",
         "grant_type": "refresh_token",
-        "refresh_token": "ghr_oldrefresh",
+        "refresh_token": STORED_REFRESH,
     }
-    assert tokens.access_token == "ghu_expiringtoken"  # noqa: S105 - fixture value
-    assert tokens.refresh_token == "ghr_refreshtoken"  # noqa: S105 - fixture value
+    assert tokens.access_token == REFRESHED_ACCESS
+    assert tokens.refresh_token == ISSUED_REFRESH
     assert tokens.access_token_expires_at == GITHUB_EPOCH + timedelta(seconds=ACCESS_TOKEN_LIFETIME)
 
 
@@ -486,7 +503,7 @@ def test_refresh_access_token_raises_when_github_returns_no_token() -> None:
         http_with(lambda request: httpx.Response(200, json=refusal)) as http,
         pytest.raises(bingo_client.DeviceFlowError) as excinfo,
     ):
-        bingo_client.refresh_access_token("Iv23liCLIENTID", "ghr_oldrefresh", http=http)
+        bingo_client.refresh_access_token("Iv23liCLIENTID", STORED_REFRESH, http=http)
 
     assert "incorrect or expired" in str(excinfo.value)
 
@@ -497,8 +514,8 @@ def test_refresh_access_token_raises_when_github_returns_no_token() -> None:
 def test_cmd_login_persists_the_github_token_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     clock = FakeClock()
     tokens = bingo_client.GithubTokenSet(
-        access_token="ghu_expiringtoken",  # noqa: S106 - fixture value
-        refresh_token="ghr_refreshtoken",  # noqa: S106 - fixture value
+        access_token=REFRESHED_ACCESS,
+        refresh_token=ISSUED_REFRESH,
         access_token_expires_at=clock() + timedelta(seconds=ACCESS_TOKEN_LIFETIME),
         refresh_token_expires_at=clock() + timedelta(seconds=REFRESH_TOKEN_LIFETIME),
     )
@@ -511,10 +528,10 @@ def test_cmd_login_persists_the_github_token_set(tmp_path: Path, monkeypatch: py
     bingo_client.cmd_login(args)
 
     state = json.loads(args.state.read_text())
-    assert state["github_access_token"] == "ghu_expiringtoken"
-    assert state["github_refresh_token"] == "ghr_refreshtoken"
-    assert state["github_access_token_expires_at"] == (clock() + timedelta(seconds=ACCESS_TOKEN_LIFETIME)).isoformat()
-    assert state["github_refresh_token_expires_at"] == (clock() + timedelta(seconds=REFRESH_TOKEN_LIFETIME)).isoformat()
+    assert state["github_access_token"] == REFRESHED_ACCESS
+    assert state["github_refresh_token"] == ISSUED_REFRESH
+    assert state["github_access_token_expires_at"] == expiry_iso(clock, ACCESS_TOKEN_LIFETIME)
+    assert state["github_refresh_token_expires_at"] == expiry_iso(clock, REFRESH_TOKEN_LIFETIME)
     assert args.state.stat().st_mode & 0o777 == 0o600
 
 
@@ -524,7 +541,7 @@ def test_cmd_login_warns_once_when_github_issues_no_refresh_token(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """No refresh token means no unattended renewal — say so, once, and name the setting."""
-    tokens = bingo_client.GithubTokenSet(access_token="gho_nonexpiring")  # noqa: S106 - fixture value
+    tokens = bingo_client.GithubTokenSet(access_token=NON_EXPIRING_ACCESS)
     monkeypatch.setattr(bingo_client, "device_flow_login", lambda *a, **k: tokens)
     monkeypatch.setattr(
         bingo_client, "enrol_with_hub", lambda *a, **k: {"client": {"id": "client-1"}, "token": "hub-minted"}
@@ -537,7 +554,7 @@ def test_cmd_login_warns_once_when_github_issues_no_refresh_token(
     assert stderr.count("Expire user authorization tokens") == 1
     assert "loop" in stderr
     state = json.loads(args.state.read_text())
-    assert state["github_access_token"] == "gho_nonexpiring"
+    assert state["github_access_token"] == NON_EXPIRING_ACCESS
     assert "github_refresh_token" not in state
 
 
@@ -548,8 +565,8 @@ def test_cmd_login_no_store_flag_persists_nothing_from_github(
 ) -> None:
     """The opt-out keeps today's posture exactly: the token is spent and dropped."""
     tokens = bingo_client.GithubTokenSet(
-        access_token="ghu_expiringtoken",  # noqa: S106 - fixture value
-        refresh_token="ghr_refreshtoken",  # noqa: S106 - fixture value
+        access_token=REFRESHED_ACCESS,
+        refresh_token=ISSUED_REFRESH,
     )
     monkeypatch.setattr(bingo_client, "device_flow_login", lambda *a, **k: tokens)
     monkeypatch.setattr(
@@ -574,8 +591,8 @@ def test_cmd_check_in_reattest_persists_the_refreshed_token_set(
     state_path = write_state(tmp_path, enrolled_state())
     clock = FakeClock()
     tokens = bingo_client.GithubTokenSet(
-        access_token="ghu_freshtoken",  # noqa: S106 - fixture value
-        refresh_token="ghr_freshrefresh",  # noqa: S106 - fixture value
+        access_token=REATTESTED_ACCESS,
+        refresh_token=REATTESTED_REFRESH,
         access_token_expires_at=clock() + timedelta(seconds=ACCESS_TOKEN_LIFETIME),
     )
     monkeypatch.setattr(bingo_client, "device_flow_login", lambda *a, **k: tokens)
@@ -587,10 +604,10 @@ def test_cmd_check_in_reattest_persists_the_refreshed_token_set(
 
     bingo_client.cmd_check_in(args)
 
-    assert hub.check_in_bodies == [{"github_token": "ghu_freshtoken"}]
+    assert hub.check_in_bodies == [{"github_token": REATTESTED_ACCESS}]
     state = json.loads(state_path.read_text())
-    assert state["github_access_token"] == "ghu_freshtoken"
-    assert state["github_refresh_token"] == "ghr_freshrefresh"
+    assert state["github_access_token"] == REATTESTED_ACCESS
+    assert state["github_refresh_token"] == REATTESTED_REFRESH
 
 
 # --- picking a usable credential without asking anybody -------------------
@@ -599,7 +616,7 @@ def test_cmd_check_in_reattest_persists_the_refreshed_token_set(
 def test_renew_github_access_reuses_a_still_valid_stored_token(tmp_path: Path) -> None:
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stillgood",
+        github_access_token=VALID_ACCESS,
         github_access_token_expires_at=(clock() + timedelta(hours=1)).isoformat(),
     )
 
@@ -607,7 +624,7 @@ def test_renew_github_access_reuses_a_still_valid_stored_token(tmp_path: Path) -
         tokens = bingo_client.renew_github_access(state, loop_args(tmp_path), http=http, now=clock)
 
     assert tokens is not None
-    assert tokens.access_token == "ghu_stillgood"  # noqa: S105 - fixture value
+    assert tokens.access_token == VALID_ACCESS
 
 
 def test_renew_github_access_reuses_a_token_that_never_expires(tmp_path: Path) -> None:
@@ -617,20 +634,20 @@ def test_renew_github_access_reuses_a_token_that_never_expires(tmp_path: Path) -
     App that cannot issue refresh tokens at all — warned once at `login`, not
     broken.
     """
-    state = enrolled_state(github_access_token="gho_nonexpiring")
+    state = enrolled_state(github_access_token=NON_EXPIRING_ACCESS)
 
     with http_with(forbidden_github) as http:
         tokens = bingo_client.renew_github_access(state, loop_args(tmp_path), http=http, now=FakeClock())
 
     assert tokens is not None
-    assert tokens.access_token == "gho_nonexpiring"  # noqa: S105 - fixture value
+    assert tokens.access_token == NON_EXPIRING_ACCESS
 
 
 def test_renew_github_access_spends_the_refresh_token_when_the_access_token_expired(tmp_path: Path) -> None:
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
         github_refresh_token_expires_at=(clock() + timedelta(days=100)).isoformat(),
     )
@@ -639,7 +656,7 @@ def test_renew_github_access_spends_the_refresh_token_when_the_access_token_expi
         tokens = bingo_client.renew_github_access(state, loop_args(tmp_path), http=http, now=clock)
 
     assert tokens is not None
-    assert tokens.access_token == "ghu_expiringtoken"  # noqa: S105 - fixture value
+    assert tokens.access_token == REFRESHED_ACCESS
 
 
 def test_renew_github_access_returns_none_without_a_stored_token(tmp_path: Path) -> None:
@@ -654,8 +671,8 @@ def test_renew_github_access_returns_none_when_the_refresh_token_itself_expired(
     """Skip the round trip: GitHub would reach the same conclusion, slower."""
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
         github_refresh_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
     )
@@ -669,8 +686,8 @@ def test_renew_github_access_returns_none_when_the_refresh_token_itself_expired(
 def test_renew_github_access_returns_none_when_github_refuses_the_refresh(tmp_path: Path) -> None:
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
     )
     refusal = {"error": "bad_refresh_token"}
@@ -693,7 +710,7 @@ def test_run_loop_reattests_across_the_ttl_with_a_non_expiring_token(tmp_path: P
     """
     clock = FakeClock()
     ttl = 7200
-    state = enrolled_state(github_access_token="gho_nonexpiring")
+    state = enrolled_state(github_access_token=NON_EXPIRING_ACCESS)
     state_path = write_state(tmp_path, state)
     hub = RecordingHub(
         leases=[httpx.Response(200, json=leased_job(f"job-{n}")) for n in range(3)],
@@ -717,14 +734,14 @@ def test_run_loop_reattests_across_the_ttl_with_a_non_expiring_token(tmp_path: P
 
     assert hub.leases_served == 3
     assert hub.check_ins == 3
-    assert hub.check_in_bodies == [{"github_token": "gho_nonexpiring"}] * 3
+    assert hub.check_in_bodies == [{"github_token": NON_EXPIRING_ACCESS}] * 3
 
 
 def test_run_loop_refreshes_an_expired_access_token_and_persists_it(tmp_path: Path) -> None:
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
     )
     state_path = write_state(tmp_path, state)
@@ -749,21 +766,19 @@ def test_run_loop_refreshes_an_expired_access_token_and_persists_it(tmp_path: Pa
         )
 
     assert github_calls == [bingo_client.GITHUB_ACCESS_TOKEN_URL]
-    assert hub.check_in_bodies == [{"github_token": "ghu_expiringtoken"}]
+    assert hub.check_in_bodies == [{"github_token": REFRESHED_ACCESS}]
     persisted = json.loads(state_path.read_text())
-    assert persisted["github_access_token"] == "ghu_expiringtoken"
-    assert persisted["github_refresh_token"] == "ghr_refreshtoken"
-    assert (
-        persisted["github_access_token_expires_at"] == (clock() + timedelta(seconds=ACCESS_TOKEN_LIFETIME)).isoformat()
-    )
+    assert persisted["github_access_token"] == REFRESHED_ACCESS
+    assert persisted["github_refresh_token"] == ISSUED_REFRESH
+    assert persisted["github_access_token_expires_at"] == expiry_iso(clock, ACCESS_TOKEN_LIFETIME)
 
 
 def test_run_loop_recovers_from_a_staleness_409_by_refreshing(tmp_path: Path) -> None:
     """A 409 *after* this run already checked in is the staleness kind — renew and retry."""
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
     )
     state_path = write_state(tmp_path, state)
@@ -789,15 +804,15 @@ def test_run_loop_recovers_from_a_staleness_409_by_refreshing(tmp_path: Path) ->
 
     assert hub.leases_served == 2
     assert hub.check_ins == 2
-    assert hub.check_in_bodies == [{"github_token": "ghu_expiringtoken"}] * 2
+    assert hub.check_in_bodies == [{"github_token": REFRESHED_ACCESS}] * 2
 
 
 def test_run_loop_exits_pointing_at_login_when_a_post_checkin_409_cannot_be_renewed(tmp_path: Path) -> None:
     """The one fatal path. Never a bare 409 loop, and never a silent one."""
     clock = FakeClock()
     state = enrolled_state(
-        github_access_token="ghu_stale",
-        github_refresh_token="ghr_oldrefresh",
+        github_access_token=STALE_ACCESS,
+        github_refresh_token=STORED_REFRESH,
         github_access_token_expires_at=(clock() - timedelta(seconds=1)).isoformat(),
     )
     state_path = write_state(tmp_path, state)

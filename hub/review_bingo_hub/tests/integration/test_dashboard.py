@@ -39,6 +39,29 @@ async def test_dashboard_no_longer_ships_the_placeholder_credential(client: Asyn
 
 
 @pytest.mark.asyncio
+async def test_dashboard_serves_policy_panel_markup(client: AsyncClient) -> None:
+    """The page a browser receives carries the B2 policy editor, not just its CSS.
+
+    Why RFC 0002 B2 (#47): served-HTML assertions are the whole test surface
+    this repo has for `dashboard/index.html` — there is no JS harness, by the
+    ticket's own resolved scope decision. So the things asserted here are the
+    ones whose absence would silently break the panel end to end: the container
+    the rows render into, and the two endpoints the panel cannot work without.
+    Runtime behaviour (keyed row reuse, dirty-edit preservation) is not
+    assertable from here and is not claimed to be.
+    """
+    response = await client.get("/dashboard")
+
+    assert response.status_code == HTTPStatus.OK
+    assert 'id="policy"' in response.text
+    assert "Policy floors" in response.text
+    # The panel is read from /auth/me (who am I, and where am I admin) joined
+    # against /policies (what is set today); neither fetch is optional.
+    assert "/auth/me" in response.text
+    assert "/policies" in response.text
+
+
+@pytest.mark.asyncio
 async def test_dashboard_says_so_when_it_was_not_deployed(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -169,6 +169,11 @@ def marge(login: str = "marge-bouvier", user_id: int = 20482231) -> GithubUserId
     return GithubUserIdentity(github_user_id=user_id, github_login=login)
 
 
+def access(repo: str, permission: PermissionLevel) -> GithubRepoAccess:
+    """One entry in the access snapshot GitHub reports for an account."""
+    return GithubRepoAccess(repo_full_name=repo, permission=permission)
+
+
 def readable(repo: str) -> GithubRepoAccess:
     """One entry in the access snapshot GitHub reports for an account.
 
@@ -176,7 +181,7 @@ def readable(repo: str) -> GithubRepoAccess:
     *level* say so explicitly, and everything else only cares that the repo is
     in the set at all.
     """
-    return GithubRepoAccess(repo_full_name=repo, permission=PermissionLevel.READ)
+    return access(repo, PermissionLevel.READ)
 
 
 async def backdate_access_refreshed_at(session: AsyncSession, identity_id: UUID, *, seconds_ago: int) -> None:

@@ -111,6 +111,8 @@ class PolicyWriteForbiddenError(PolicyAuthorizationError):
 # The values are what they say: the caller could not be resolved.
 REASON_UNKNOWN_CALLER = "unknown_token"
 REASON_NOT_ADMIN = "not_admin"
+REASON_CLIENT_NOT_FOUND = "client_not_found"
+REASON_CLIENT_WRONG_IDENTITY = "client_wrong_identity"
 
 # The dev-mode bypass has no ReviewClient to name — no client is registered at
 # all for a raw shared-secret write. This sentinel makes that absence explicit
@@ -454,13 +456,13 @@ async def authorize_client_revoke(session: AsyncSession, credential: str, client
 
     target = await get_client_by_id(session, client_id)
     if target is None:
-        LOGGER.warning("client_revoke_denied", extra={**log_extra, "reason": "client_not_found"})
+        LOGGER.warning("client_revoke_denied", extra={**log_extra, "reason": REASON_CLIENT_NOT_FOUND})
         return None
 
     if not dev_mode and (caller_identity_id is None or target.identity_id != caller_identity_id):
         LOGGER.warning(
             "client_revoke_denied",
-            extra={**log_extra, "reason": "client_wrong_identity", "target_client_name": target.name},
+            extra={**log_extra, "reason": REASON_CLIENT_WRONG_IDENTITY, "target_client_name": target.name},
         )
         return None
 

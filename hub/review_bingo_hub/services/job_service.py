@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import ColumnElement, Select, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
@@ -125,23 +125,36 @@ async def cancel_queued_jobs_for_pr(session: AsyncSession, repo_full_name: str, 
     return result.rowcount or 0
 
 
-async def reclaim_expired_leases(session: AsyncSession) -> int:
-    """Requeue leased jobs whose lease has lapsed; exhaust ones out of attempts."""
-    now = datetime.now(UTC)
+async def _transition_leased_jobs(session: AsyncSession, key_predicate: ColumnElement[bool]) -> int:
+    """Requeue (or exhaust) every LEASED job matching `key_predicate`.
+
+    Shared by `reclaim_expired_leases` and `release_leased_jobs_for_client`,
+    which differ only in what identifies the leases to release — an expired
+    clock vs. a specific client. Keeping the two-step requeue-else-exhaust
+    transition in one place means a future change to it (a new terminal
+    state, a different attempts comparison, another column to clear) cannot
+    be applied to one caller and silently forgotten on the other.
+    """
     requeued = await session.execute(
         update(ReviewJob)
         .where(col(ReviewJob.state) == JobState.LEASED.value)
-        .where(col(ReviewJob.lease_expires_at) < now)
+        .where(key_predicate)
         .where(col(ReviewJob.attempts) < col(ReviewJob.max_attempts))
         .values(state=JobState.QUEUED.value, leased_by=None, lease_expires_at=None)
     )
     await session.execute(
         update(ReviewJob)
         .where(col(ReviewJob.state) == JobState.LEASED.value)
-        .where(col(ReviewJob.lease_expires_at) < now)
+        .where(key_predicate)
         .values(state=JobState.EXHAUSTED.value, leased_by=None, lease_expires_at=None)
     )
     return requeued.rowcount or 0
+
+
+async def reclaim_expired_leases(session: AsyncSession) -> int:
+    """Requeue leased jobs whose lease has lapsed; exhaust ones out of attempts."""
+    now = datetime.now(UTC)
+    return await _transition_leased_jobs(session, col(ReviewJob.lease_expires_at) < now)
 
 
 async def release_leased_jobs_for_client(session: AsyncSession, client_id: UUID) -> int:
@@ -163,20 +176,7 @@ async def release_leased_jobs_for_client(session: AsyncSession, client_id: UUID)
     ON DELETE SET NULL, so once the delete lands there is nothing left to
     filter on and the lease is orphaned in the LEASED state instead.
     """
-    requeued = await session.execute(
-        update(ReviewJob)
-        .where(col(ReviewJob.state) == JobState.LEASED.value)
-        .where(col(ReviewJob.leased_by) == client_id)
-        .where(col(ReviewJob.attempts) < col(ReviewJob.max_attempts))
-        .values(state=JobState.QUEUED.value, leased_by=None, lease_expires_at=None)
-    )
-    await session.execute(
-        update(ReviewJob)
-        .where(col(ReviewJob.state) == JobState.LEASED.value)
-        .where(col(ReviewJob.leased_by) == client_id)
-        .values(state=JobState.EXHAUSTED.value, leased_by=None, lease_expires_at=None)
-    )
-    return requeued.rowcount or 0
+    return await _transition_leased_jobs(session, col(ReviewJob.leased_by) == client_id)
 
 
 async def reported_jobs_for_client(session: AsyncSession, client_id: UUID) -> list[UUID]:

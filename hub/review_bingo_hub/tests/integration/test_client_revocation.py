@@ -43,7 +43,11 @@ from sqlmodel import col
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.review_client import ReviewClient
 from review_bingo_hub.models.review_job import JobState, ReviewJob
-from review_bingo_hub.services.identity_service import CALLER_IDENTITY_UNAVAILABLE_DEV_MODE
+from review_bingo_hub.services.identity_service import (
+    CALLER_IDENTITY_UNAVAILABLE_DEV_MODE,
+    REASON_CLIENT_NOT_FOUND,
+    REASON_CLIENT_WRONG_IDENTITY,
+)
 from review_bingo_hub.tests.integration.conftest import (
     ALLOWED,
     Enrolee,
@@ -225,9 +229,9 @@ async def test_revoke_nonexistent_client_returns_404_indistinguishably_and_still
     denied = records_named(caplog, "client_revoke_denied")
     assert len(denied) == 2
     by_reason = {record.__dict__["reason"]: record for record in denied}
-    assert set(by_reason) == {"client_not_found", "client_wrong_identity"}
+    assert set(by_reason) == {REASON_CLIENT_NOT_FOUND, REASON_CLIENT_WRONG_IDENTITY}
 
-    missing = by_reason["client_not_found"]
+    missing = by_reason[REASON_CLIENT_NOT_FOUND]
     assert missing.__dict__["target_client_id"] == str(missing_id)
     assert missing.__dict__["github_login"] == "prober"
     assert missing.__dict__["github_user_id"] == 1
@@ -237,7 +241,7 @@ async def test_revoke_nonexistent_client_returns_404_indistinguishably_and_still
 
     # The refusal that *did* find a row names it — the operator needs to know
     # whose machine someone just tried to unplug.
-    forbidden = by_reason["client_wrong_identity"]
+    forbidden = by_reason[REASON_CLIENT_WRONG_IDENTITY]
     assert forbidden.__dict__["target_client_id"] == theirs_id
     assert forbidden.__dict__["target_client_name"] == "theirs"
 
@@ -247,6 +251,27 @@ async def test_missing_credential_returns_401(client: AsyncClient, monkeypatch: 
     github_mode_without_github(monkeypatch)
 
     response = await client.delete(f"/clients/{uuid4()}", headers={"Authorization": "not-a-bearer"})
+
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_unresolvable_credential_returns_401(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed bearer token that matches no client or session is still a 401.
+
+    Distinct from `test_missing_credential_returns_401`: that test never gets
+    past `get_revoke_credential`'s own presence check, so it never reaches
+    `authorize_client_revoke` at all. A token that *parses* as a bearer
+    credential but resolves to neither a registered client nor a live
+    dashboard session — an expired session, an already-revoked client's own
+    token reused here — takes a different path: `resolve_scoped_caller` raises
+    `PolicyCallerUnauthenticatedError`, which the endpoint's own except clause
+    maps to 401.
+    """
+    github_mode_without_github(monkeypatch)
+
+    response = await client.delete(
+        f"/clients/{uuid4()}", headers=enrolment_headers("token-that-parses-but-matches-nothing")
+    )
 
     assert response.status_code == HTTPStatus.UNAUTHORIZED
 
@@ -481,7 +506,7 @@ async def test_dev_mode_secret_revoking_nonexistent_client_returns_404_and_logs(
 
     denied = records_named(caplog, "client_revoke_denied")
     assert len(denied) == 1
-    assert denied[0].__dict__["reason"] == "client_not_found"
+    assert denied[0].__dict__["reason"] == REASON_CLIENT_NOT_FOUND
     assert denied[0].__dict__["target_client_id"] == str(missing_id)
     assert denied[0].__dict__["caller_identity"] == CALLER_IDENTITY_UNAVAILABLE_DEV_MODE
     assert "target_client_name" not in denied[0].__dict__

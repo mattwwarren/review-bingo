@@ -31,7 +31,7 @@ it survivable at a workplace, where the operator is not watching:
    reopened / ready_for_review. A human clicking **request review** — the
    universal "look at this again" gesture — does nothing.
 
-## Decisions
+## Resolved decisions
 
 - **D-REFRESH — The GitHub credential stays client-side; the client now keeps it.**
   The device flow already returns a refresh token when the App has expiring

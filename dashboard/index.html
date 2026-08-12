@@ -93,6 +93,12 @@
     .hall { grid-template-columns: minmax(0, 1fr); }
   }
 
+  /* The main column, so the card and the policy panel stack under one another
+     rather than auto-placing into the rail's track. min-width:0 because a grid
+     item defaults to min-content width, and one long repo name would otherwise
+     widen the whole column past its share. */
+  .column { display: grid; gap: 32px; align-content: start; min-width: 0; }
+
   .eyebrow {
     font-family: var(--mono);
     font-size: 11px;
@@ -209,6 +215,84 @@
     font-size: 14px;
   }
 
+  /* ---- policy floors --------------------------------------------------- */
+
+  .policy { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+
+  .policy-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 12px 14px;
+    background: var(--ink-2);
+    border: 1px solid #2C3372;
+    border-radius: 3px;
+    font-size: 13px;
+  }
+  @media (max-width: 700px) {
+    .policy-row { grid-template-columns: minmax(0, 1fr); justify-items: start; }
+  }
+
+  .policy-repo { font-weight: 700; letter-spacing: -0.01em; word-break: break-word; }
+
+  /* The caller's own level on this repo, not the repo's state — it is here to
+     explain why a row is editable or not, so it sits beside the controls it
+     accounts for. */
+  .policy-perm {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .policy-row[data-editable="true"] .policy-perm { color: var(--signal); }
+
+  .policy-tier, .policy-enabled { cursor: pointer; }
+  .policy-tier {
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    border: 1px solid var(--dim);
+    background: var(--ink);
+    color: var(--chalk);
+  }
+  .policy-tier:focus-visible,
+  .policy-enabled:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+  .policy-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .policy-enabled { accent-color: var(--dauber); }
+
+  /* A row with no policy row on the hub yet, or one the caller only reads:
+     the same two facts, stated rather than offered. Never a disabled control —
+     a greyed-out select still says "you could change this", which is exactly
+     the wrong thing to tell someone who cannot. */
+  .policy-fact {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .policy-status {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    grid-column: 1 / -1;
+  }
+  .policy-status[data-tone="error"] { color: var(--dauber); }
+  .policy-status[data-tone="saved"] { color: var(--signal); }
+  .policy-status:empty { display: none; }
+
   /* ---- rail ------------------------------------------------------------ */
 
   .rail { display: grid; gap: 26px; }
@@ -321,10 +405,17 @@
 </section>
 
 <main class="hall">
-  <section>
-    <p class="eyebrow">The card — work called from GitHub</p>
-    <ul class="card" id="card"></ul>
-  </section>
+  <div class="column">
+    <section>
+      <p class="eyebrow">The card — work called from GitHub</p>
+      <ul class="card" id="card"></ul>
+    </section>
+
+    <section>
+      <p class="eyebrow">Policy floors — the minimum model tier a repo will accept</p>
+      <ul class="policy" id="policy"></ul>
+    </section>
+  </div>
 
   <aside class="rail">
     <section>
@@ -345,16 +436,30 @@
   const POLL_MS = 2000;
   const LEASABLE = "queued";
   const DAUBED = new Set(["leased", "reported", "relayed"]);
+  // Mirrors ModelTier on the hub, in rank order. Hardcoded for the same reason
+  // LEASABLE and DAUBED are: these are the wire values, and a fetched copy of
+  // three strings that change about once a year is a request per poll to learn
+  // nothing.
+  const TIERS = ["experimental", "standard", "frontier"];
+  const ADMIN = "admin";
+  // What the hub does for a repo with no policy row at all: dispatch treats a
+  // missing row as experimental-and-enabled, so the editor pre-fills the same
+  // thing rather than inventing a blank state the server has no notion of.
+  const NO_POLICY = { min_tier: "experimental", enabled: true };
 
   let selectedId = null;
   let latestJobs = [];
+  let latestMe = null;
+  let latestPolicies = [];
   let pickedSignature = null;
   let session = null;
   let loginTimer = null;
   const cellsById = new Map();   // job id -> its <li>, so cells are reused, not rebuilt
+  const policyRowsByRepo = new Map();  // repo full name -> its <li>, same reason
 
   const el = {
     card: document.getElementById("card"),
+    policy: document.getElementById("policy"),
     roster: document.getElementById("roster"),
     tally: document.getElementById("tally"),
     health: document.getElementById("health"),
@@ -423,15 +528,22 @@
       return;
     }
     try {
-      const [jobsRes, clientsRes] = await Promise.all([
+      // /auth/me and /policies join the same round trip rather than getting a
+      // loop of their own: the policy panel is a join of the two, and fetching
+      // them on separate clocks would render a repo against a permission read
+      // at a different moment.
+      const [jobsRes, clientsRes, meRes, policiesRes] = await Promise.all([
         fetch(`${HUB}/jobs`, { headers: authHeaders() }),
         fetch(`${HUB}/clients`, { headers: authHeaders() }),
+        fetch(`${HUB}/auth/me`, { headers: authHeaders() }),
+        fetch(`${HUB}/policies`, { headers: authHeaders() }),
       ]);
+      const responses = [jobsRes, clientsRes, meRes, policiesRes];
 
       // Check the status before parsing. A 401 body parses perfectly well, and
       // an object arriving where an array belongs would fail somewhere in
       // rendering — reported as "hub unreachable", which it plainly is not.
-      if ([jobsRes.status, clientsRes.status].some((s) => s === 401 || s === 403)) {
+      if (responses.some((r) => r.status === 401 || r.status === 403)) {
         // Expired or revoked. Drop it and ask for a new one rather than
         // polling twice a second against a credential the hub refuses.
         clearSession();
@@ -439,17 +551,20 @@
         showLogin();
         return;
       }
-      if (!jobsRes.ok || !clientsRes.ok) {
+      if (responses.some((r) => !r.ok)) {
         setHealth(false);
         return;
       }
 
-      const [jobs, clients] = await Promise.all([jobsRes.json(), clientsRes.json()]);
+      const [jobs, clients, me, policies] = await Promise.all(responses.map((r) => r.json()));
       setHealth(true);
       latestJobs = jobs;
+      latestMe = me;
+      latestPolicies = policies;
       renderCard(jobs);
       renderRoster(clients);
       renderTally(jobs, clients);
+      renderPolicy(latestMe, latestPolicies);
 
       // Only redraw the selected panel when that job actually moved.
       const picked = jobs.find((j) => j.id === selectedId);
@@ -656,6 +771,194 @@
         </li>`,
       )
       .join("");
+  }
+
+  /* ---- policy floors -----------------------------------------------------
+     The one review knob the hub owns, edited where the person already is.
+     Which rows are editable is derived here from /auth/me rather than asked of
+     the hub per row (RFC 0002 D-ME): the hub already reports the caller's own
+     permission on every repo it can see, and a second server-side "may I edit
+     this" answer would be the same fact computed twice, free to disagree.
+
+     Editability is a rendering decision only. The hub re-checks admin on every
+     PUT — this panel deciding wrongly would cost a 403, never a write. */
+
+  function renderPolicy(me, policies) {
+    const repos = ((me && me.repos) || [])
+      .slice()
+      .sort((a, b) => a.repo_full_name.localeCompare(b.repo_full_name));
+    if (!repos.length) {
+      if (!el.policy.querySelector(".empty")) {
+        policyRowsByRepo.clear();
+        el.policy.innerHTML =
+          `<li class="empty">GitHub reports no repos for your account, so there are no floors to set here.</li>`;
+      }
+      return;
+    }
+    const empty = el.policy.querySelector(".empty");
+    if (empty) empty.remove();
+
+    const byRepo = new Map(policies.map((p) => [p.repo_full_name, p]));
+    const live = new Set();
+    repos.forEach((entry, index) => {
+      const name = entry.repo_full_name;
+      live.add(name);
+      const editable = entry.permission === ADMIN;
+      let item = policyRowsByRepo.get(name);
+      // Losing (or gaining) admin flips the row between controls and plain
+      // text, which is different DOM. Rebuild on exactly that transition, not
+      // on every poll — the whole point of the keyed update below.
+      if (item && item.dataset.editable !== String(editable)) {
+        item.remove();
+        item = null;
+      }
+      if (!item) {
+        item = buildPolicyRow(name, editable);
+        policyRowsByRepo.set(name, item);
+      }
+      // A repo with no policy row on the hub reads as the defaults dispatch
+      // would apply to it anyway, not as a blank the server has no notion of.
+      updatePolicyRow(item, entry, byRepo.get(name) || NO_POLICY);
+      const occupant = el.policy.children[index];
+      if (occupant !== item) el.policy.insertBefore(item, occupant || null);
+    });
+
+    for (const [name, item] of policyRowsByRepo) {
+      if (!live.has(name)) {
+        item.remove();
+        policyRowsByRepo.delete(name);
+      }
+    }
+  }
+
+  function buildPolicyRow(repoFullName, editable) {
+    const item = document.createElement("li");
+    item.className = "policy-row";
+    item.dataset.repo = repoFullName;
+    item.dataset.editable = String(editable);
+
+    // A non-admin gets the facts stated, never a disabled control: a greyed-out
+    // select still says "you could change this", which is the wrong thing to
+    // tell someone who cannot.
+    const controls = editable
+      ? `<select class="policy-tier" aria-label="Minimum model tier for ${escapeHtml(repoFullName)}">
+           ${TIERS.map((tier) => `<option value="${tier}">${tier}</option>`).join("")}
+         </select>
+         <label class="policy-toggle">
+           <input class="policy-enabled" type="checkbox"> dispatching
+         </label>
+         <button class="copy policy-save" type="button">Save</button>`
+      : `<span class="policy-fact policy-tier-fact"></span>
+         <span class="policy-fact policy-enabled-fact"></span>
+         <span></span>`;
+
+    item.innerHTML = `
+      <span class="policy-repo">${escapeHtml(repoFullName)}</span>
+      <span class="policy-perm"></span>
+      ${controls}
+      <span class="policy-status" role="status"></span>`;
+
+    if (editable) {
+      const touched = () => {
+        item.dataset.dirty = "true";
+        setRowStatus(item, "", null);
+      };
+      item.querySelector(".policy-tier").addEventListener("change", touched);
+      item.querySelector(".policy-enabled").addEventListener("change", touched);
+      item.querySelector(".policy-save").addEventListener("click", () => savePolicy(item));
+    }
+    return item;
+  }
+
+  /* Touch only what changed, so a row nobody is looking at stays still. */
+  function updatePolicyRow(item, entry, policy) {
+    const perm = item.querySelector(".policy-perm");
+    if (perm.textContent !== entry.permission) perm.textContent = entry.permission;
+
+    if (item.dataset.editable !== "true") {
+      const tier = item.querySelector(".policy-tier-fact");
+      const enabled = item.querySelector(".policy-enabled-fact");
+      const enabledText = policy.enabled ? "dispatching" : "paused";
+      if (tier.textContent !== policy.min_tier) tier.textContent = policy.min_tier;
+      if (enabled.textContent !== enabledText) enabled.textContent = enabledText;
+      return;
+    }
+
+    // A poll tick lands twice a second; an edit takes longer than that. Writing
+    // the server's values into a control someone has already moved would throw
+    // the edit away mid-keystroke, so a dirty row waits until its own save
+    // clears the flag.
+    if (item.dataset.dirty === "true") return;
+
+    const tier = item.querySelector(".policy-tier");
+    if (tier.value !== policy.min_tier) tier.value = policy.min_tier;
+    const toggle = item.querySelector(".policy-enabled");
+    if (toggle.checked !== policy.enabled) toggle.checked = policy.enabled;
+  }
+
+  async function savePolicy(item) {
+    const repoFullName = item.dataset.repo;
+    // Split on the *first* slash only: the owner cannot contain one, the repo
+    // name cannot either, and slicing rather than split() keeps that explicit.
+    const slash = repoFullName.indexOf("/");
+    const owner = repoFullName.slice(0, slash);
+    const repo = repoFullName.slice(slash + 1);
+    const payload = {
+      min_tier: item.querySelector(".policy-tier").value,
+      enabled: item.querySelector(".policy-enabled").checked,
+    };
+    const button = item.querySelector(".policy-save");
+
+    button.disabled = true;
+    setRowStatus(item, "Saving…", null);
+    try {
+      const response = await fetch(`${HUB}/policies/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
+        method: "PUT",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        // The session is gone — a different fact from "you may not do this",
+        // and the only one of the two that should take the page back to
+        // sign-in. The poll loop treats 401 the same way.
+        clearSession();
+        setHealth("unauthorized");
+        showLogin();
+        return;
+      }
+      if (!response.ok) {
+        // 403 lands here: GitHub moved this account off admin since the page
+        // was drawn. The hub's own words say that better than a guess would,
+        // and the row keeps its edit so a reload is not the only way back.
+        setRowStatus(item, errorDetail(body, "Could not save this floor."), "error");
+        return;
+      }
+      delete item.dataset.dirty;
+      recordPolicy(body);
+      renderPolicy(latestMe, latestPolicies);
+      setRowStatus(item, "Saved", "saved");
+    } catch {
+      setRowStatus(item, "Could not reach the hub to save.", "error");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  /* The hub's echo, not the form, is what dispatch will read — so the saved
+     row is redrawn from the response rather than left showing what was typed,
+     and the next poll finds nothing to change. */
+  function recordPolicy(policy) {
+    const index = latestPolicies.findIndex((p) => p.repo_full_name === policy.repo_full_name);
+    if (index === -1) latestPolicies.push(policy);
+    else latestPolicies[index] = policy;
+  }
+
+  function setRowStatus(item, message, tone) {
+    const status = item.querySelector(".policy-status");
+    status.textContent = message;
+    if (tone) status.dataset.tone = tone;
+    else delete status.dataset.tone;
   }
 
   function select(id) {

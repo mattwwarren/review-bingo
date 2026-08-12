@@ -23,6 +23,11 @@
 # "Enable Device Flow". Grid clients enrol by completing that flow against
 # github.com; without it, `bingo_client.py login` gets a device-code request
 # back with error=device_flow_disabled and no client can ever join.
+#
+# While you are there, also tick "Expire user authorization tokens". That is
+# what makes GitHub issue refresh tokens, which is what lets a client running
+# `bingo_client.py loop` renew its own attestation instead of needing a human
+# to re-run `login` every time the hub's access snapshot ages out.
 set -euo pipefail
 
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -155,6 +160,8 @@ else
 fi
 echo
 echo "Before any client can enrol: tick 'Enable Device Flow' on the App's settings page."
+echo "For clients that run 'loop' unattended, also tick 'Expire user authorization tokens'"
+echo "— that is what issues the refresh tokens they renew their attestation with."
 echo
 if [[ -n "${GENERATED_SECRET:-}" ]]; then
   echo "No webhook secret was supplied, so one was generated. Paste this into the"

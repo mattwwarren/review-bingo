@@ -27,9 +27,11 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+from review_bingo_hub.api.clients import ScopedCallerDep
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.core.logging import get_logging_context
 from review_bingo_hub.db.session import SessionDep
+from review_bingo_hub.models.github_identity import PermissionLevel
 from review_bingo_hub.services.dashboard_session_service import create_session
 from review_bingo_hub.services.github_identity_service import (
     DevicePollResult,
@@ -43,6 +45,7 @@ from review_bingo_hub.services.identity_service import (
     REASON_DEVICE_TOKEN_EXPIRED,
     EnrolmentDeniedError,
     EnrolmentUnavailableError,
+    caller_identity_snapshot,
     resolve_identity_from_github_token,
 )
 
@@ -54,6 +57,7 @@ DETAIL_LOGIN_UNCONFIGURED = "Dashboard login is unavailable: this hub has no GIT
 DETAIL_GITHUB_UNREACHABLE = "Could not reach GitHub to sign you in; try again shortly"
 DETAIL_DEVICE_CODE_EXPIRED = "That sign-in code expired before it was authorized — start again"
 DETAIL_DEVICE_ACCESS_DENIED = "Sign-in was denied on github.com"
+DETAIL_NO_IDENTITY = "No GitHub identity linked to this caller"
 
 # Which refusals are the caller's to fix, and their reason code for the audit
 # record. Kept as data rather than a branch per case so the two cannot fall out
@@ -98,6 +102,24 @@ class DevicePollResponse(BaseModel):
     session_token: str | None = Field(default=None, description="Dashboard bearer token; set only when authorized")
     expires_at: datetime | None = Field(default=None, description="When that session stops working")
     github_login: str | None = Field(default=None, description="Who signed in; display only")
+
+
+class RepoAccessEntry(BaseModel):
+    """One repo GitHub reported for the caller, at the permission it recorded."""
+
+    repo_full_name: str
+    permission: PermissionLevel
+
+
+class MeResponse(BaseModel):
+    """Who the caller is, and where GitHub says they have repo access."""
+
+    github_login: str
+    access_refreshed_at: datetime
+    access_is_stale: bool = Field(
+        description="True when the cached access snapshot is past its TTL; the dashboard should prompt re-login"
+    )
+    repos: list[RepoAccessEntry]
 
 
 def _require_login_configured() -> str:
@@ -211,4 +233,36 @@ async def _mint_session(
         session_token=token,
         expires_at=dashboard_session.expires_at,
         github_login=identity.github_login,
+    )
+
+
+@router.get("/me", response_model=MeResponse)
+async def me_endpoint(session: SessionDep, caller: ScopedCallerDep) -> MeResponse:
+    """Who the caller is, and where GitHub says they have repo access.
+
+    Not in `RequireTokenMiddleware.PUBLIC_PATHS` on purpose: unlike the device
+    flow above, this route answers on behalf of a caller who must already have
+    a credential, so the deny-by-default gate alone produces 401 for a missing
+    or malformed Authorization header before this handler ever runs.
+
+    404s rather than an empty body for a caller with no GitHub identity behind
+    it — a dev-mode-enrolled `ReviewClient` with no linked account, the only
+    caller `ScopedCallerDep` can resolve with `identity_id is None` (a
+    dashboard session always carries one). There is nothing to report, and a
+    200 with blank fields would read as a real, empty account rather than an
+    absent one.
+    """
+    if caller.identity_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DETAIL_NO_IDENTITY)
+    snapshot = await caller_identity_snapshot(session, caller.identity_id)
+    if snapshot is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DETAIL_NO_IDENTITY)
+    return MeResponse(
+        github_login=snapshot.github_login,
+        access_refreshed_at=snapshot.access_refreshed_at,
+        access_is_stale=snapshot.access_is_stale,
+        repos=[
+            RepoAccessEntry(repo_full_name=access.repo_full_name, permission=access.permission)
+            for access in snapshot.repo_access
+        ],
     )

@@ -194,6 +194,17 @@ async def accessible_repo_names(session: AsyncSession, identity_id: UUID | None)
     return frozenset(result.scalars().all())
 
 
+def _snapshot_is_stale(refreshed_at: datetime) -> bool:
+    """The one TTL comparison both staleness answers share.
+
+    Extracted so `identity_access_is_stale` (keyed on a `ReviewClient`, with its
+    own mode/identity carve-outs) and `caller_identity_snapshot` (keyed directly
+    on an `identity_id` it has already resolved, with no carve-outs of its own
+    left to make) cannot drift into two different definitions of "too old".
+    """
+    return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
+
+
 async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) -> bool:
     """Whether this client's cached GitHub access is too old to lease against.
 
@@ -224,7 +235,7 @@ async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) 
     refreshed_at = result.scalar_one_or_none()
     if refreshed_at is None:
         return True
-    return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
+    return _snapshot_is_stale(refreshed_at)
 
 
 async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
@@ -334,6 +345,58 @@ async def _github_identity_fields(session: AsyncSession, identity_id: UUID | Non
     if row is None:
         return {"github_login": None, "github_user_id": None}
     return {"github_login": row[0], "github_user_id": row[1]}
+
+
+@dataclass(frozen=True)
+class CallerIdentitySnapshot:
+    """What `GET /auth/me` reports for the caller's own account.
+
+    Bundles the identity fields with the repo-access snapshot in one dataclass
+    rather than returning them separately, since `/auth/me` always wants both
+    together and a caller with no identity row gets `None` from
+    `caller_identity_snapshot` rather than a snapshot with empty fields.
+    """
+
+    github_login: str
+    access_refreshed_at: datetime
+    access_is_stale: bool
+    repo_access: list[GithubRepoAccess]
+
+
+async def caller_identity_snapshot(session: AsyncSession, identity_id: UUID) -> CallerIdentitySnapshot | None:
+    """The identity fields and repo-access snapshot `/auth/me` reports, or None if the row is gone.
+
+    Two queries rather than a join, mirroring `_github_identity_fields` and
+    `accessible_repo_names`'s own query shapes: this is a read-path helper, not
+    a hot one, and matching the module's existing query shapes keeps the three
+    "what does this identity_id resolve to" answers easy to compare by eye.
+    """
+    result = await session.execute(
+        select(GithubIdentity.github_login, GithubIdentity.access_refreshed_at).where(
+            col(GithubIdentity.id) == identity_id
+        )
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None
+    github_login, refreshed_at = row
+
+    access_result = await session.execute(
+        select(IdentityRepoAccess.repo_full_name, IdentityRepoAccess.permission).where(
+            col(IdentityRepoAccess.identity_id) == identity_id
+        )
+    )
+    repo_access = [
+        GithubRepoAccess(repo_full_name=repo_full_name, permission=permission)
+        for repo_full_name, permission in access_result.all()
+    ]
+
+    return CallerIdentitySnapshot(
+        github_login=github_login,
+        access_refreshed_at=refreshed_at,
+        access_is_stale=_snapshot_is_stale(refreshed_at),
+        repo_access=repo_access,
+    )
 
 
 async def authorize_policy_write(session: AsyncSession, credential: str, repo_full_name: str) -> None:

@@ -76,7 +76,7 @@ it survivable at a workplace, where the operator is not watching:
   alternative — `can_edit` flags sprinkled per response row — scatters the
   same fact across endpoints and drifts. `/auth/me` reveals only what the
   caller's own GitHub account already knows about itself.
-- **D-SERIAL-DASH — Dashboard tickets serialize.** `dashboard/index.html` is a
+- **D-ONEFILE — Dashboard tickets serialize.** `dashboard/index.html` is a
   single file; two parallel workers editing it guarantees a conflict. B2 and
   B3 declare an explicit dependency chain instead.
 
@@ -162,7 +162,7 @@ with revoke and attestation-freshness.
 - **Sprint:** 2
 - **Depends on:** B1
 - **Context:** Policy floors are curl-only. The API is complete (`GET /policies`, `PUT /policies/{owner}/{repo}` behind repo-admin, `api/policies.py:87`); what is missing is a surface. The dashboard already polls and renders authenticated data, so this is a panel, not an app.
-- **Scope:** D-ME, D-SERIAL-DASH
+- **Scope:** D-ME, D-ONEFILE
 - **Acceptance:**
   - A signed-in user sees policies for repos they can see, and an editor (min-tier select, enabled toggle) exactly on repos where `/auth/me` reports `admin` — including repos with no policy row yet.
   - Saving calls the existing `PUT`; a 403 (stale permission) surfaces the hub's message rather than a silent failure.
@@ -175,8 +175,8 @@ with revoke and attestation-freshness.
 - **Wave:** 2
 - **Sprint:** 2
 - **Depends on:** A2, B2
-- **Context:** The roster view lists clients but manages nothing. With A2's endpoint and B1's identity, the dashboard can mark the caller's own machines, show attestation freshness (the thing that silently kills peers today), and offer revoke. Serialized after B2 because both edit `dashboard/index.html` (D-SERIAL-DASH).
-- **Scope:** D-SELFREVOKE, D-SERIAL-DASH
+- **Context:** The roster view lists clients but manages nothing. With A2's endpoint and B1's identity, the dashboard can mark the caller's own machines, show attestation freshness (the thing that silently kills peers today), and offer revoke. Serialized after B2 because both edit `dashboard/index.html` (D-ONEFILE).
+- **Scope:** D-SELFREVOKE, D-ONEFILE
 - **Acceptance:**
   - The roster marks clients belonging to the signed-in identity and shows each one's attestation age and time-to-expiry (roster payload gains the additive fields it needs).
   - A revoke control appears only on the caller's own clients, calls `DELETE /clients/{id}`, confirms before firing, and the roster reflects the removal on the next poll.

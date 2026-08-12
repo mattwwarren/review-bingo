@@ -16,11 +16,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from review_bingo_hub.core.config import settings
 from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.review_client import (
     CheckInRequest,
     ClientStatus,
     ReviewClient,
+    ReviewClientCheckInRead,
     ReviewClientCreate,
     ReviewClientRead,
     ReviewClientRegistered,
@@ -144,13 +146,13 @@ async def register_client_endpoint(
     return ReviewClientRegistered(client=ReviewClientRead.model_validate(client), token=token)
 
 
-@router.post("/check-in", response_model=ReviewClientRead)
+@router.post("/check-in", response_model=ReviewClientCheckInRead)
 async def check_in_endpoint(
     session: SessionDep,
     client: ClientDep,
     github: GithubIdentityServiceDep,
     payload: CheckInRequest | None = None,
-) -> ReviewClientRead:
+) -> ReviewClientCheckInRead:
     """Declare availability: 'I've got tokens — plug me in for a round.'
 
     An optional `github_token` in the body re-attests the caller's cached
@@ -159,6 +161,12 @@ async def check_in_endpoint(
     call. A token that fails validation, or resolves to a different GitHub
     account than this client is already linked to, is rejected with 401 and
     check-in does not proceed.
+
+    The response carries `identity_access_ttl_seconds` either way. It is
+    Settings-derived, not a function of whether a re-attestation happened, and
+    it is here so an unattended client can schedule its next re-attestation off
+    the hub's real deadline instead of a guess that a config change would
+    silently invalidate.
     """
     if payload is not None and payload.github_token:
         try:
@@ -180,7 +188,10 @@ async def check_in_endpoint(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
     client = await set_client_status(session, client, ClientStatus.CHECKED_IN)
     await session.commit()
-    return ReviewClientRead.model_validate(client)
+    return ReviewClientCheckInRead(
+        **ReviewClientRead.model_validate(client).model_dump(),
+        identity_access_ttl_seconds=settings.identity_access_ttl_seconds,
+    )
 
 
 @router.post("/check-out", response_model=ReviewClientRead)

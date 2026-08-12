@@ -25,7 +25,9 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 # PR actions that represent new reviewable work
-REVIEWABLE_ACTIONS = frozenset({"opened", "synchronize", "reopened", "ready_for_review"})
+REVIEWABLE_ACTIONS = frozenset(
+    {"opened", "synchronize", "reopened", "ready_for_review", "review_requested"}
+)
 
 
 def verify_signature(body: bytes, signature_header: str | None, secret: str) -> bool:

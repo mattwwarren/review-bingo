@@ -103,32 +103,15 @@ with revoke and attestation-freshness.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** none
-- **Context:** `loop` (`client/bingo_client.py:337`) never re-attests; the
-  access snapshot freezes at enrolment and the peer dies at the TTL wall
-  (issue #35). The device flow already hands back a refresh token when the
-  App enables expiring user tokens; the client currently discards everything
-  GitHub returns. Hub-side nothing changes — the hub continues to read and
-  discard presented tokens (RFC 0001 D-DEVICE).
+- **Context:** `loop` (`client/bingo_client.py:337`) never re-attests; the access snapshot freezes at enrolment and the peer dies at the TTL wall (issue #35). The device flow already hands back a refresh token when the App enables expiring user tokens; the client currently discards everything GitHub returns. Hub-side nothing changes — the hub continues to read and discard presented tokens (RFC 0001 D-DEVICE).
 - **Scope:** D-REFRESH, D-HALFTTL
 - **Acceptance:**
-  - `login` persists `access_token`, `refresh_token`, and expiry (when
-    present) in the state file, which remains mode 0600; the hub still never
-    stores a GitHub credential.
-  - `loop` re-attests via check-in when the last attestation is older than
-    half the TTL, and reactively on a staleness 409 from lease; renewal
-    prefers a still-valid stored access token, then the refresh-token
-    exchange.
-  - A client started with `loop` and left alone leases across at least one
-    TTL boundary in a test using a faked GitHub seam.
-  - When renewal is impossible (no refresh token, refresh rejected), the
-    client exits non-zero with a message naming `bingo_client.py login`; when
-    the App has expiring tokens disabled, `login` warns that unattended
-    renewal is unavailable.
-  - Check-in response carries the hub's `IDENTITY_ACCESS_TTL_SECONDS`
-    (additive field) so the client never hardcodes the cadence.
-  - `client/README.md` documents the unattended story and the App's
-    "expiring user tokens" prerequisite; `scripts/github-app-setup.sh`'s
-    manual-steps note mentions it alongside device flow.
+  - `login` persists `access_token`, `refresh_token`, and expiry (when present) in the state file, which remains mode 0600; the hub still never stores a GitHub credential.
+  - `loop` re-attests via check-in when the last attestation is older than half the TTL, and reactively on a staleness 409 from lease; renewal prefers a still-valid stored access token, then the refresh-token exchange.
+  - A client started with `loop` and left alone leases across at least one TTL boundary in a test using a faked GitHub seam.
+  - When renewal is impossible (no refresh token, refresh rejected), the client exits non-zero with a message naming `bingo_client.py login`; when the App has expiring tokens disabled, `login` warns that unattended renewal is unavailable.
+  - Check-in response carries the hub's `IDENTITY_ACCESS_TTL_SECONDS` (additive field) so the client never hardcodes the cadence.
+  - `client/README.md` documents the unattended story and the App's "expiring user tokens" prerequisite; `scripts/github-app-setup.sh`'s manual-steps note mentions it alongside device flow.
   - Issue #35 is closed by this ticket with a pointer to D-REFRESH/D-HALFTTL.
 
 ### A2 — Client revocation, self-service within an identity
@@ -137,26 +120,14 @@ with revoke and attestation-freshness.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** none
-- **Context:** No revocation surface exists: clients check out voluntarily
-  (`hub/review_bingo_hub/api/clients.py:186`) and a lost machine holds a
-  valid bearer token until someone edits the database. The caller's identity
-  is already resolvable from either credential kind
-  (`services/identity_service.py`), so authorization is one comparison
-  against the target's `identity_id`.
+- **Context:** No revocation surface exists: clients check out voluntarily (`hub/review_bingo_hub/api/clients.py:186`) and a lost machine holds a valid bearer token until someone edits the database. The caller's identity is already resolvable from either credential kind (`services/identity_service.py`), so authorization is one comparison against the target's `identity_id`.
 - **Scope:** D-SELFREVOKE
 - **Acceptance:**
-  - `DELETE /clients/{client_id}` removes the client when the caller's
-    identity matches the target's `identity_id`; the response distinguishes
-    nothing for out-of-identity targets (404, matching RFC 0001 D-404's
-    disclosure rule).
-  - A revoked client's bearer token stops working immediately; any active
-    lease it held is released for requeue.
-  - The action lands in the activity log with caller identity and target
-    client name.
-  - Under `dev` enrolment mode the enrolment secret may revoke, behind the
-    existing named mode and startup warning.
-  - `README.md` documents that removing another person's machine is done by
-    removing their GitHub repo access, and why (the invariant).
+  - `DELETE /clients/{client_id}` removes the client when the caller's identity matches the target's `identity_id`; out-of-identity targets get 404, matching RFC 0001 D-404's disclosure rule.
+  - A revoked client's bearer token stops working immediately; any active lease it held is released for requeue.
+  - The action lands in the activity log with caller identity and target client name.
+  - Under `dev` enrolment mode the enrolment secret may revoke, behind the existing named mode and startup warning.
+  - `README.md` documents that removing another person's machine is done by removing their GitHub repo access, and why (the invariant).
 
 ### A3 — review_requested triggers a round
 
@@ -164,19 +135,12 @@ with revoke and attestation-freshness.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** none
-- **Context:** `REVIEWABLE_ACTIONS` (`hub/review_bingo_hub/api/webhooks.py:28`)
-  covers PR lifecycle only; a reviewer clicking **request review** does
-  nothing. The webhook already receives `pull_request` events, so this is a
-  handler change, not an App configuration change.
+- **Context:** `REVIEWABLE_ACTIONS` (`hub/review_bingo_hub/api/webhooks.py:28`) covers PR lifecycle only; a reviewer clicking **request review** does nothing. The webhook already receives `pull_request` events, so this is a handler change, not an App configuration change.
 - **Scope:** D-REQUESTED
 - **Acceptance:**
-  - A `pull_request` event with action `review_requested` enqueues a job for
-    the PR head under the same policy-floor snapshotting as other actions.
-  - Active-job dedup still applies: re-request during a queued/leased round
-    is a no-op; re-request after a reported round enqueues a fresh job. A
-    test covers both.
-  - Disabled repos (`repo_policy.enabled = false`) enqueue nothing, same as
-    every other action.
+  - A `pull_request` event with action `review_requested` enqueues a job for the PR head under the same policy-floor snapshotting as other actions.
+  - Active-job dedup still applies: re-request during a queued/leased round is a no-op; re-request after a reported round enqueues a fresh job. A test covers both.
+  - Disabled repos (`repo_policy.enabled = false`) enqueue nothing, same as every other action.
 
 ### B1 — GET /auth/me: caller identity and repo permissions
 
@@ -184,19 +148,12 @@ with revoke and attestation-freshness.
 - **Wave:** 1
 - **Sprint:** 1
 - **Depends on:** none
-- **Context:** The dashboard has a session but no way to ask "who am I and
-  where am I admin", so it cannot decide where to offer policy editing.
-  Identity and the permission-bearing access set already exist
-  (`models/github_identity.py`); this exposes the caller's own slice of it.
+- **Context:** The dashboard has a session but no way to ask "who am I and where am I admin", so it cannot decide where to offer policy editing. Identity and the permission-bearing access set already exist (`models/github_identity.py`); this exposes the caller's own slice of it.
 - **Scope:** D-ME
 - **Acceptance:**
-  - `GET /auth/me` returns `github_login`, `access_refreshed_at`, and the
-    caller's repos each with its permission level, for both credential kinds
-    (grid-client token and dashboard session).
-  - It never returns another identity's data, and unauthenticated callers
-    get 401 via the existing middleware.
-  - An expired or stale identity is reported as such (additive field), not
-    hidden — the dashboard uses it to prompt re-login.
+  - `GET /auth/me` returns `github_login`, `access_refreshed_at`, and the caller's repos each with its permission level, for both credential kinds (grid-client token and dashboard session).
+  - It never returns another identity's data, and unauthenticated callers get 401 via the existing middleware.
+  - An expired or stale identity is reported as such (additive field), not hidden — the dashboard uses it to prompt re-login.
 
 ### B2 — Dashboard policy editor
 
@@ -204,17 +161,11 @@ with revoke and attestation-freshness.
 - **Wave:** 2
 - **Sprint:** 2
 - **Depends on:** B1
-- **Context:** Policy floors are curl-only. The API is complete
-  (`GET /policies`, `PUT /policies/{owner}/{repo}` behind repo-admin,
-  `api/policies.py:87`); what is missing is a surface. The dashboard already
-  polls and renders authenticated data, so this is a panel, not an app.
+- **Context:** Policy floors are curl-only. The API is complete (`GET /policies`, `PUT /policies/{owner}/{repo}` behind repo-admin, `api/policies.py:87`); what is missing is a surface. The dashboard already polls and renders authenticated data, so this is a panel, not an app.
 - **Scope:** D-ME, D-SERIAL-DASH
 - **Acceptance:**
-  - A signed-in user sees policies for repos they can see, and an editor
-    (min-tier select, enabled toggle) exactly on repos where `/auth/me`
-    reports `admin` — including repos with no policy row yet.
-  - Saving calls the existing `PUT`; a 403 (stale permission) surfaces the
-    hub's message rather than a silent failure.
+  - A signed-in user sees policies for repos they can see, and an editor (min-tier select, enabled toggle) exactly on repos where `/auth/me` reports `admin` — including repos with no policy row yet.
+  - Saving calls the existing `PUT`; a 403 (stale permission) surfaces the hub's message rather than a silent failure.
   - Non-admin repos render read-only with no implication of editability.
   - The existing poll loop's focus/selection preservation still holds.
 
@@ -224,22 +175,13 @@ with revoke and attestation-freshness.
 - **Wave:** 2
 - **Sprint:** 2
 - **Depends on:** A2, B2
-- **Context:** The roster view lists clients but manages nothing. With A2's
-  endpoint and B1's identity, the dashboard can mark the caller's own
-  machines, show attestation freshness (the thing that silently kills peers
-  today), and offer revoke. Serialized after B2 because both edit
-  `dashboard/index.html` (D-SERIAL-DASH).
+- **Context:** The roster view lists clients but manages nothing. With A2's endpoint and B1's identity, the dashboard can mark the caller's own machines, show attestation freshness (the thing that silently kills peers today), and offer revoke. Serialized after B2 because both edit `dashboard/index.html` (D-SERIAL-DASH).
 - **Scope:** D-SELFREVOKE, D-SERIAL-DASH
 - **Acceptance:**
-  - The roster marks clients belonging to the signed-in identity and shows
-    each one's attestation age and time-to-expiry (roster payload gains the
-    additive fields it needs).
-  - A revoke control appears only on the caller's own clients, calls
-    `DELETE /clients/{id}`, confirms before firing, and the roster reflects
-    the removal on the next poll.
+  - The roster marks clients belonging to the signed-in identity and shows each one's attestation age and time-to-expiry (roster payload gains the additive fields it needs).
+  - A revoke control appears only on the caller's own clients, calls `DELETE /clients/{id}`, confirms before firing, and the roster reflects the removal on the next poll.
   - A stale or near-expiry client is visually flagged.
-  - `dashboard/README.md` stops claiming the dashboard is not started and
-    describes what exists.
+  - `dashboard/README.md` stops claiming the dashboard is not started and describes what exists.
 
 ## Out of scope
 

@@ -12,11 +12,15 @@ Two properties matter more than the rest:
   404-not-403 oracle rule on a job it cannot reach. Anything narrower would
   blank the dashboard; anything wider would make the login a privilege
   escalation.
-* **Reading is all it may do.** Leasing, checking in, reporting, and writing a
-  repo policy stay on the machine credential path. The policy-write case is
-  asserted as 401 rather than 403 on purpose: 403 would mean `ScopedCallerDep`
-  had been wired into `RepoAdminDep` and the session merely lacked admin, which
-  is a far shorter step away from actually granting it.
+* **Acting as a machine is what it may not do.** Leasing, checking in, and
+  reporting stay on the machine credential path — a browser tab is not a box
+  with tokens to spend. Writing a repo policy is the one deliberate exception,
+  added by RFC 0002 B2 (#47) so the dashboard's policy editor can save: a
+  session whose identity GitHub records as `admin` on the repo passes, and one
+  recorded at `write`/`read`/nothing is refused with 403 — the identical check a
+  grid client's token gets, applied to the identical cached permission. The
+  status code is the pin: 403 says the session resolved and lacked admin, 401
+  would say the write path never learned this credential exists at all.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from review_bingo_hub.models.github_identity import PermissionLevel
 from review_bingo_hub.models.repo_policy import RepoPolicyUpsert
 from review_bingo_hub.services.policy_service import upsert_policy
 from review_bingo_hub.tests.integration.conftest import (
@@ -36,6 +41,7 @@ from review_bingo_hub.tests.integration.conftest import (
     UNRELATED,
     Enrolee,
     FakeGithubIdentityService,
+    access,
     enqueue,
     enrol_github_client,
     expire_session_for,
@@ -44,6 +50,9 @@ from review_bingo_hub.tests.integration.conftest import (
 )
 
 VIEWER = Enrolee(login="marge-viewer", user_id=91, repo_access=[readable(ALLOWED)])
+# The same person, one permission level up. Separate rather than parameterised:
+# admin is the only level that opens the policy write, so it is worth naming.
+ADMIN_VIEWER = Enrolee(login="marge-admin", user_id=92, repo_access=[access(ALLOWED, PermissionLevel.ADMIN)])
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +169,7 @@ async def test_client_token_and_dashboard_session_read_the_same_feed(
 
 
 # ---------------------------------------------------------------------------
-# Writes: a session may not do any of them
+# Writes: machine actions are refused; a policy write turns on repo admin
 # ---------------------------------------------------------------------------
 
 
@@ -178,22 +187,43 @@ async def test_dashboard_session_cannot_act_as_a_grid_client(
     assert response.status_code == HTTPStatus.UNAUTHORIZED
 
 
-async def test_dashboard_session_cannot_write_a_repo_policy(
+async def test_dashboard_session_write_allowed_for_admin_repo(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """401, not 403 — the write path never learns this credential exists.
+    """Repo admin opens the floor knob from a browser session too.
 
-    403 would mean `ScopedCallerDep` had been wired into `RepoAdminDep` and the
-    session simply was not an admin. That is a materially different posture, and
-    a much shorter step from here to a session that *can* turn the model floor
-    down.
+    Why RFC 0002 B2 (#47): this replaces a pin that refused every dashboard
+    session here with 401. That pin was right for RFC 0001, where the dashboard
+    was a read-only monitor by design. B2 makes the dashboard the place a repo
+    owner sets the floor, and the authority it checks is unchanged — GitHub's
+    recorded `admin` on this repo, read from the same access snapshot a grid
+    client's token is checked against.
+    """
+    headers = await start_dashboard_session(client, monkeypatch, FakeGithubIdentityService(), ADMIN_VIEWER)
+
+    response = await client.put(f"/policies/{ALLOWED}", json={"min_tier": "standard"}, headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["min_tier"] == "standard"
+
+
+async def test_dashboard_session_write_rejected_for_non_admin_repo(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read access shows you the floor; it never lets you move it.
+
+    Why RFC 0002 B2 (#47): the counterpart to the case above, and the half that
+    keeps the widening honest. `VIEWER` can see `ALLOWED` — its job feed and
+    policy reads above prove it — and still cannot write here. 403 rather than
+    401 is the pin now: the session resolved fine, it just is not an admin.
     """
     headers = await start_dashboard_session(client, monkeypatch, FakeGithubIdentityService(), VIEWER)
 
     response = await client.put(f"/policies/{ALLOWED}", json={"min_tier": "standard"}, headers=headers)
 
-    assert response.status_code == HTTPStatus.UNAUTHORIZED
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 # ---------------------------------------------------------------------------

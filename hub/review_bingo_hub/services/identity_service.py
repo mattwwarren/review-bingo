@@ -238,27 +238,6 @@ async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) 
     return _snapshot_is_stale(refreshed_at)
 
 
-async def _resolve_caller_client(session: AsyncSession, credential: str) -> ReviewClient:
-    """The grid client behind a bearer credential, or a 401-shaped refusal.
-
-    Still client-only, on purpose. `resolve_scoped_caller` below is the wider
-    door for *reads*; this one stays narrow because its remaining caller is
-    `authorize_policy_write`, and a write path must not silently start accepting
-    a credential class it was never reviewed against.
-    """
-    # Deferred, not top-level: client_service.py already imports
-    # accessible_repo_names from this module (#22, job/roster access scoping),
-    # so a top-level import here in the reverse direction is circular whichever
-    # module loads first. Importing at call time breaks the cycle at no runtime
-    # cost — both modules have finished loading long before this runs.
-    from review_bingo_hub.services.client_service import get_client_by_token  # noqa: PLC0415
-
-    client = await get_client_by_token(session, credential)
-    if client is None:
-        raise PolicyCallerUnauthenticatedError(reason=REASON_UNKNOWN_CALLER, detail=DETAIL_UNKNOWN_CALLER)
-    return client
-
-
 @dataclass(frozen=True)
 class ScopedCaller:
     """Whoever is behind a bearer credential on a *read* endpoint.
@@ -296,9 +275,10 @@ async def resolve_scoped_caller(session: AsyncSession, credential: str) -> Scope
             expired session lands here too, and must: to a caller it is
             indistinguishable from a token that was never issued.
     """
-    # Deferred for the same cycle-breaking reason as _resolve_caller_client's
-    # import above; dashboard_session_service imports client_service, which
-    # imports this module.
+    # Deferred, not top-level: dashboard_session_service imports client_service,
+    # which in turn imports this module, so a top-level import of either here
+    # would cycle. Importing at call time breaks the cycle at no runtime cost —
+    # both modules have finished loading long before this runs.
     from review_bingo_hub.services.client_service import get_client_by_token  # noqa: PLC0415
     from review_bingo_hub.services.dashboard_session_service import get_identity_id_for_token  # noqa: PLC0415
 
@@ -406,9 +386,32 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
     — the same comparison POST /clients makes (_resolve_dev_credential, in this
     module), not a parallel one, so there is one named bypass rather than two.
 
-    github mode: the caller's hub-minted token must resolve to a client whose
-    cached GitHub identity is recorded as `admin` on this repo. A client with
-    no identity at all fails closed, exactly as it does for dispatch.
+    github mode: the caller's credential must resolve to a GitHub identity that
+    is recorded as `admin` on this repo. A caller with no identity at all fails
+    closed, exactly as it does for dispatch.
+
+    Either credential kind resolves here (`resolve_scoped_caller`), the same
+    door reads already come through, since RFC 0002 B2 (#47): the dashboard's
+    policy editor saves through this endpoint, and RFC 0001 D-POLICY's invariant
+    — whoever GitHub says administers a repo may set that repo's model floor —
+    names the *identity*, not the machine. A browser session and a grid client
+    belonging to the same account resolve to the same `github_identity` row and
+    the same cached per-repo permission, so admitting one and not the other
+    would answer the same question two ways.
+
+    What is deliberately *not* widened is the check: `permission == ADMIN`
+    below runs identically whichever kind resolved, and `client_id` simply
+    becomes optional in the audit record because a person has no machine to
+    name. Before B2 this path resolved through a client-only helper; that
+    narrowness was RFC 0001's read-only-dashboard posture, not a property of
+    the invariant.
+
+    `resolve_scoped_caller` tries the dashboard-session table first, so a
+    grid-client token — the only credential kind this path saw before B2 —
+    now costs one extra indexed lookup (a miss on sessions, then a hit on
+    clients) instead of going straight to the client table. Negligible here:
+    unlike the poll-driven reads that share this resolver, a policy write is
+    a low-frequency, button-click path.
 
     Raises:
         PolicyCallerUnauthenticatedError: credential resolves to nobody (401).
@@ -427,16 +430,19 @@ async def authorize_policy_write(session: AsyncSession, credential: str, repo_fu
         )
         return
 
-    client = await _resolve_caller_client(session, credential)
+    caller = await resolve_scoped_caller(session, credential)
     permission = (
-        await _repo_permission(session, client.identity_id, repo_full_name) if client.identity_id is not None else None
+        await _repo_permission(session, caller.identity_id, repo_full_name) if caller.identity_id is not None else None
     )
     log_extra = {
         **get_logging_context(),
         "repo_full_name": repo_full_name,
-        "client_id": str(client.id),
-        "identity_id": str(client.identity_id) if client.identity_id else None,
-        **(await _github_identity_fields(session, client.identity_id)),
+        # Both optional, and both still present as keys when absent: a dashboard
+        # session has no client row, and a dropped field would read as an
+        # omission bug rather than the deliberate "there is no machine here".
+        "client_id": str(caller.client_id) if caller.client_id else None,
+        "identity_id": str(caller.identity_id) if caller.identity_id else None,
+        **(await _github_identity_fields(session, caller.identity_id)),
     }
     if permission != PermissionLevel.ADMIN:
         LOGGER.warning("policy_write_denied", extra={**log_extra, "permission": permission})
@@ -486,9 +492,9 @@ async def authorize_client_revoke(session: AsyncSession, credential: str, client
         PolicyCallerUnauthenticatedError: credential resolves to nobody (401).
         EnrolmentDeniedError: dev-mode secret rejected (401).
     """
-    # Deferred for the same cycle-breaking reason as `_resolve_caller_client`'s
-    # import above: both client_service and job_service import this module at
-    # top level, so the reverse imports have to happen at call time.
+    # Deferred for the same cycle-breaking reason as `resolve_scoped_caller`'s
+    # deferred imports above: both client_service and job_service import this
+    # module at top level, so the reverse imports have to happen at call time.
     from review_bingo_hub.services.client_service import get_client_by_id  # noqa: PLC0415
     from review_bingo_hub.services.job_service import reported_jobs_for_client  # noqa: PLC0415
 

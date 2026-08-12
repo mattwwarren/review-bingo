@@ -37,6 +37,7 @@ from review_bingo_hub.tests.integration.conftest import (
     GITHUB_TOKEN,
     Enrolee,
     FakeGithubIdentityService,
+    access,
     dump,
     enrolment_headers,
     marge,
@@ -60,11 +61,6 @@ REGISTRATION_PAYLOAD = {
     "provider": "ollama",
     "tier": "standard",
 }
-
-
-def access(repo: str, permission: PermissionLevel) -> GithubRepoAccess:
-    """One entry in the access snapshot GitHub reports for an account."""
-    return GithubRepoAccess(repo_full_name=repo, permission=permission)
 
 
 @dataclass(frozen=True)
@@ -264,31 +260,61 @@ async def test_policy_write_rejected_for_dev_enrolled_client_in_github_mode(
     assert response.status_code == HTTPStatus.FORBIDDEN
 
 
-async def test_policy_write_rejected_for_dashboard_session(
+async def dashboard_session_headers(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A dashboard session is a valid credential of the wrong kind, not an invalid one.
-
-    B1 (#24) keyed read scoping on the identity a dashboard session already
-    carries, which makes "just let a session write policy too" the
-    natural-looking next change from here. Today it is wrong, and 401 (not
-    403) is the pin that keeps it wrong on purpose: 403 would mean
-    `ScopedCallerDep` had been wired into `RepoAdminDep`, and the session
-    merely lacked admin rather than never being a credential this path
-    recognizes at all.
-    """
-    fake = FakeGithubIdentityService()
+    permission: PermissionLevel,
+) -> dict[str, str]:
+    """A signed-in dashboard session for one identity at one permission on ADMIN_REPO."""
     enrolee = Enrolee(
         login="marge-bouvier",
         user_id=20482231,
-        repo_access=[access(repo=ADMIN_REPO, permission=PermissionLevel.ADMIN)],
+        repo_access=[access(repo=ADMIN_REPO, permission=permission)],
     )
-    headers = await start_dashboard_session(client, monkeypatch, fake, enrolee)
+    return await start_dashboard_session(client, monkeypatch, FakeGithubIdentityService(), enrolee)
+
+
+async def test_policy_write_allowed_for_admin_dashboard_session(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed-in admin may set the floor from the browser, exactly as from a client token.
+
+    Why RFC 0002 B2: this supersedes the RFC 0001-era pin that refused every
+    dashboard session here with 401 regardless of permission. B2's dashboard
+    policy editor saves through this very endpoint, and D-POLICY's invariant —
+    whoever GitHub says administers a repo may set that repo's floor — names the
+    *identity*, not the credential kind. A session resolves to the same
+    `github_identity` and the same cached per-repo permission a grid client
+    does, so the admin check below is the identical one, not a relaxed one.
+    """
+    headers = await dashboard_session_headers(client, monkeypatch, PermissionLevel.ADMIN)
+
+    response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "frontier"}, headers=headers)
+
+    assert response.status_code == HTTPStatus.OK
+    body = response.json()
+    assert body["repo_full_name"] == ADMIN_REPO
+    assert body["min_tier"] == "frontier"
+
+
+async def test_policy_write_rejected_for_non_admin_dashboard_session(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """403, not 401 — the write path knows this credential and refuses it on permission.
+
+    Why RFC 0002 B2: the widening is to the credential *kinds* the resolver
+    admits, never to the check itself. Push access is still not policy access
+    for a browser session, exactly as `test_policy_write_rejected_for_write_permission`
+    pins it for a machine token. The status code is the tell: 401 would mean the
+    session was never resolved at all, 403 means it was and lacked admin.
+    """
+    headers = await dashboard_session_headers(client, monkeypatch, PermissionLevel.WRITE)
 
     response = await client.put(f"/policies/{ADMIN_REPO}", json={"min_tier": "experimental"}, headers=headers)
 
-    assert response.status_code == HTTPStatus.UNAUTHORIZED
+    assert response.status_code == HTTPStatus.FORBIDDEN
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +359,46 @@ async def test_policy_write_denied_logs_policy_write_denied(
 
     # The bearer token is the means to retry; identity fields say who, not how.
     token = enrolled.headers["Authorization"].removeprefix("Bearer ")
+    for captured in caplog.records:
+        assert token not in dump(captured)
+
+
+async def test_policy_write_denied_for_session_logs_the_identity_without_a_client_id(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A session-originated refusal still names the human — there is just no machine to name.
+
+    Why RFC 0002 B2: once a dashboard session reaches this gate, `client_id`
+    stops being a field every denial carries, because a person browsing has no
+    row on the grid. It logs as None rather than being dropped: a missing key
+    would read as an omission bug, and the identity fields — which are what
+    "who tried to lower this repo's floor" actually needs — are still required.
+    """
+    headers = await dashboard_session_headers(client, monkeypatch, PermissionLevel.READ)
+
+    with caplog.at_level(logging.DEBUG):
+        response = await client.put(
+            f"/policies/{ADMIN_REPO}",
+            json={"min_tier": "experimental"},
+            headers=headers,
+        )
+
+    assert response.status_code == HTTPStatus.FORBIDDEN
+    denied = records_named(caplog, "policy_write_denied")
+    assert len(denied) == 1
+    record = denied[0]
+    assert record.levelno == logging.WARNING
+    assert record.__dict__["repo_full_name"] == ADMIN_REPO
+    assert record.__dict__["client_id"] is None
+    assert record.__dict__["identity_id"] is not None
+    assert record.__dict__["permission"] == PermissionLevel.READ
+    assert record.__dict__["github_login"] == "marge-bouvier"
+    assert record.__dict__["github_user_id"] == 20482231
+
+    # Same rule as the client-token denial above: identity fields say who, not how.
+    token = headers["Authorization"].removeprefix("Bearer ")
     for captured in caplog.records:
         assert token not in dump(captured)
 

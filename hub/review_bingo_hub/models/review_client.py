@@ -158,6 +158,45 @@ class ReviewClientCheckInRead(ReviewClientRead):
     )
 
 
+class ReviewClientRosterRead(ReviewClientRead):
+    """The roster's response: the client, plus whose it is and how long it stays admitted.
+
+    A roster-only subclass for the same reason `ReviewClientCheckInRead` is a
+    check-in-only one — and the sibling to compare it against. These four fields
+    are answers to "which of these machines are mine, and which are about to go
+    dark", which is a question only a roster's caller is asking: registration
+    returns one client the caller just created, and check-in returns the caller
+    itself, so neither has an ownership comparison to make.
+
+    Note what is *not* here: `identity_access_ttl_seconds`. That constant is
+    check-in's, and on a roster it would be the same configured number repeated
+    once per row — `test_only_check_in_gained_the_ttl_field` pins its absence.
+    `access_expires_at` is the per-row form instead: an absolute deadline the
+    dashboard can count down from without knowing the hub's configuration, and
+    one that stays correct for a row whose attestation is older than its
+    neighbours'.
+    """
+
+    is_own: bool = Field(
+        description=(
+            "Whether this client enrolled under the calling account's GitHub identity. False for "
+            "every dev-mode row, where no identity exists on either side and equality would "
+            "otherwise read as ownership"
+        )
+    )
+    access_refreshed_at: datetime | None = Field(
+        description="When this client's GitHub repo access was last re-read; None with no linked identity"
+    )
+    access_expires_at: datetime | None = Field(
+        description=(
+            "When this client's cached access goes too stale to lease against; None with no linked identity"
+        )
+    )
+    access_is_stale: bool = Field(
+        description="Whether that deadline has already passed. False with no linked identity — nothing to age"
+    )
+
+
 class ReviewClientRegistered(SQLModel):
     """Registration response: the one and only time the token is shown."""
 

@@ -27,11 +27,12 @@ from review_bingo_hub.models.review_client import (
     ReviewClientCreate,
     ReviewClientRead,
     ReviewClientRegistered,
+    ReviewClientRosterRead,
 )
 from review_bingo_hub.services.client_service import (
     delete_client,
     get_client_by_token,
-    list_clients,
+    list_clients_with_attestation,
     register_client,
     set_client_status,
 )
@@ -263,15 +264,20 @@ async def revoke_client_endpoint(client_id: UUID, session: SessionDep, credentia
     await session.commit()
 
 
-@router.get("", response_model=list[ReviewClientRead])
+@router.get("", response_model=list[ReviewClientRosterRead])
 async def list_clients_endpoint(
     session: SessionDep,
     caller: ScopedCallerDep,
     offset: int = 0,
     limit: int = 100,
-) -> list[ReviewClientRead]:
-    """Roster for the dashboard: who's plugged in on repos this caller can see."""
-    clients = await list_clients(
-        session, identity_id=caller.identity_id, own_client_id=caller.client_id, offset=offset, limit=limit
-    )
-    return [ReviewClientRead.model_validate(c) for c in clients]
+) -> list[ReviewClientRosterRead]:
+    """Roster for the dashboard: who's plugged in on repos this caller can see.
+
+    Each row also says whether it is the caller's own machine and when its
+    GitHub attestation runs out (RFC 0002 B3). Both are computed here rather
+    than left to the reader: `is_own` is an identity comparison with a
+    `None == None` trap in it, and the expiry needs the hub's own TTL — a
+    dashboard deriving either for itself would be a second authority on facts
+    `DELETE /clients/{id}` and the lease gate already decide.
+    """
+    return await list_clients_with_attestation(session, caller, offset=offset, limit=limit)

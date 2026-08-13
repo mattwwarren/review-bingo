@@ -47,26 +47,10 @@ from review_bingo_hub.tests.integration.conftest import (
     FakeGithubIdentityService,
     backdate_access_refreshed_at,
     enqueue,
+    enrol_dev_client,
     enrol_github_client,
-    enrolment_headers,
     readable,
 )
-
-
-async def enrol_dev_client(client: AsyncClient, name: str) -> tuple[str, dict[str, str]]:
-    """Register + check in a dev-mode client, riding the fixture's placeholder secret."""
-    response = await client.post(
-        "/clients",
-        json={"name": name, "model_name": "test-model", "provider": "test", "tier": "standard"},
-    )
-    assert response.status_code == HTTPStatus.CREATED
-    body = response.json()
-    headers = enrolment_headers(body["token"])
-
-    check_in = await client.post("/clients/check-in", headers=headers)
-    assert check_in.status_code == HTTPStatus.OK
-    client_id: str = body["client"]["id"]
-    return client_id, headers
 
 
 async def make_client_row(session: AsyncSession, name: str, identity_id: UUID | None = None) -> ReviewClient:

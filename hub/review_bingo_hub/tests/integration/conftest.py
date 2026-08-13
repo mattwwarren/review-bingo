@@ -28,6 +28,11 @@ round from a webhook" scaffolding `test_repo_scoped_access.py` already had, and
 two copies of an access-scoping helper is two places for the boundary under
 test to drift.
 
+`enrol_dev_client` made the trip on RFC 0002 B3 (#48), on the same second-consumer
+rule: `test_client_roster_attestation.py` has to prove two identity-less clients
+never read as each other's own row, and that needs exactly the dev-mode enrolment
+`test_repo_scoped_access.py` already had a helper for.
+
 These are plain module-level helpers, not pytest fixtures — callers import
 and call them directly. They sit in `conftest.py` only because that is the
 canonical home for test-support code shared across a directory.
@@ -295,6 +300,22 @@ async def enrol_github_client(
             "tier": enrolee.tier,
         },
         headers=enrolment_headers(GITHUB_TOKEN),
+    )
+    assert response.status_code == HTTPStatus.CREATED
+    body = response.json()
+    headers = enrolment_headers(body["token"])
+
+    check_in = await client.post("/clients/check-in", headers=headers)
+    assert check_in.status_code == HTTPStatus.OK
+    client_id: str = body["client"]["id"]
+    return client_id, headers
+
+
+async def enrol_dev_client(client: AsyncClient, name: str) -> tuple[str, dict[str, str]]:
+    """Register + check in a dev-mode client, riding the fixture's placeholder secret."""
+    response = await client.post(
+        "/clients",
+        json={"name": name, "model_name": "test-model", "provider": "test", "tier": "standard"},
     )
     assert response.status_code == HTTPStatus.CREATED
     body = response.json()

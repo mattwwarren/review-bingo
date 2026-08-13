@@ -316,6 +316,48 @@
   .plug[data-status="checked_out"]::before { background: #3B4288; }
   .plug-spec { font-family: var(--mono); font-size: 11px; color: var(--dim); }
 
+  /* Your own machines, marked. Every colour cue below is paired with words —
+     the badge says "yours", .plug-attest spells the attestation state out —
+     following the #health/.pulse convention of always setting textContent
+     beside data-live. A rail of coloured dots nobody can look up is a legend
+     you have to already know. */
+  .plug[data-own="true"]::before { box-shadow: 0 0 0 3px rgba(255, 194, 75, 0.18); }
+  .plug-own {
+    margin-left: 7px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--signal);
+  }
+
+  .plug-attest { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  /* Two readings, not one gradient. Near-expiry is "this stops leasing soon",
+     amber like every other "the round is landing" signal on the page; stale is
+     "it already stopped", and takes the dauber so it cannot be mistaken for the
+     warning it has already passed. Mutually exclusive by construction — see
+     nearExpiry() below. */
+  .plug[data-near-expiry="true"] .plug-attest { color: var(--signal); }
+  .plug[data-stale="true"] .plug-attest { color: var(--dauber); }
+  .plug[data-stale="true"]::before { background: var(--dauber); }
+
+  /* Destructive, so it reads as an outlier against .copy's neutral chalk —
+     but built on .copy, because it is the same kind of control and a second
+     button shape would just be a second thing to keep in sync. */
+  .revoke {
+    margin-top: 6px;
+    padding: 4px 9px;
+    font-size: 11px;
+    border-color: #4A2748;
+    color: #FF7FB2;
+  }
+  .revoke:hover { border-color: var(--dauber); color: var(--dauber); }
+  .revoke:disabled { opacity: 0.5; cursor: default; }
+
+  .plug-status { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .plug-status[data-tone="error"] { color: var(--dauber); }
+  .plug-status:empty { display: none; }
+
   .picked {
     border-top: 1px solid #262C63;
     padding-top: 18px;
@@ -452,9 +494,19 @@
   // exhaustive (see poll()/renderPolicy below) — an absent row must never be
   // read as "no policy" when it might just be "not on this page".
   const POLICIES_FETCH_LIMIT = 1000;
+  // How little of an attestation window may be left before a client is flagged
+  // as near expiry. A display threshold only — the hub's own gate is the expiry
+  // itself, and `access_is_stale` on the wire is the authority for that.
+  // A quarter rather than a half because RFC 0002 D-HALFTTL already has a
+  // healthy client re-attesting at the halfway mark: a box still counting down
+  // inside the last quarter has *missed* that renewal, which is the fact worth
+  // showing. Flagging at a half would light up every peer mid-cycle and mean
+  // nothing.
+  const NEAR_EXPIRY_FRACTION = 0.25;
 
   let selectedId = null;
   let latestJobs = [];
+  let latestClients = [];
   let latestMe = null;
   let latestPolicies = [];
   let latestPoliciesMaybeTruncated = false;
@@ -463,6 +515,7 @@
   let loginTimer = null;
   const cellsById = new Map();   // job id -> its <li>, so cells are reused, not rebuilt
   const policyRowsByRepo = new Map();  // repo full name -> its <li>, same reason
+  const clientsById = new Map();       // client id -> its <li>, same reason again
 
   const el = {
     card: document.getElementById("card"),
@@ -566,6 +619,7 @@
       const [jobs, clients, me, policies] = await Promise.all(responses.map((r) => r.json()));
       setHealth(true);
       latestJobs = jobs;
+      latestClients = clients;
       latestMe = me;
       latestPolicies = policies;
       // A response landing exactly at the requested cap could be hiding more
@@ -768,20 +822,207 @@
       </li>`;
   }
 
+  /* ---- plugged in --------------------------------------------------------
+     The roster stopped being a read-only list at RFC 0002 B3: it now says
+     which machines are the signed-in account's own, how long each one's GitHub
+     attestation still has to run, and offers revoke on the ones the hub would
+     actually let this caller revoke.
+
+     Both of those facts are read off the payload, never re-derived here.
+     `is_own` is the same identity comparison `DELETE /clients/{id}` authorizes
+     on, and `access_is_stale` is the same clock the lease gate enforces — a
+     dashboard computing either for itself would be a second authority, free to
+     disagree with the one that decides. The single thing decided locally is
+     NEAR_EXPIRY_FRACTION, which gates no write at all.
+
+     Keyed update, for the reasons renderCard documents: a rail rebuilt twice a
+     second cannot hold a confirm dialog open over one of its own buttons. */
+
   function renderRoster(clients) {
     if (!clients.length) {
-      el.roster.innerHTML = `<li class="muted">Nobody plugged in. Register a client and check in.</li>`;
+      if (!el.roster.querySelector(".roster-empty")) {
+        clientsById.clear();
+        el.roster.innerHTML =
+          `<li class="muted roster-empty">Nobody plugged in. Register a client and check in.</li>`;
+      }
       return;
     }
-    el.roster.innerHTML = clients
-      .map(
-        (c) => `
-        <li class="plug" data-status="${c.status}">
-          <span>${escapeHtml(c.name)}</span>
-          <span class="plug-spec">${escapeHtml(c.model_name)} · ${escapeHtml(c.provider)} · ${escapeHtml(c.tier)}</span>
-        </li>`,
-      )
-      .join("");
+    const empty = el.roster.querySelector(".roster-empty");
+    if (empty) empty.remove();
+
+    const live = new Set();
+    clients.forEach((c, index) => {
+      live.add(c.id);
+      let item = clientsById.get(c.id);
+      // Gaining or losing the revoke button is different DOM, exactly like a
+      // policy row flipping between controls and plain text. Rebuild on that
+      // transition only — it happens when someone signs in as another account,
+      // not on an ordinary poll.
+      if (item && item.dataset.own !== String(Boolean(c.is_own))) {
+        item.remove();
+        item = null;
+      }
+      if (!item) {
+        item = buildClientRow(c);
+        clientsById.set(c.id, item);
+      }
+      updateClientRow(item, c);
+      const occupant = el.roster.children[index];
+      if (occupant !== item) el.roster.insertBefore(item, occupant || null);
+    });
+
+    for (const [id, item] of clientsById) {
+      if (!live.has(id)) {
+        item.remove();
+        clientsById.delete(id);
+      }
+    }
+  }
+
+  function buildClientRow(c) {
+    const item = document.createElement("li");
+    item.className = "plug";
+    item.dataset.own = String(Boolean(c.is_own));
+
+    // The revoke button exists only on the caller's own rows, because those are
+    // the only ones the hub would honour: anything else answers 404, and an
+    // affordance whose whole outcome is "Client not found" teaches the operator
+    // that the dashboard is broken rather than that the rule exists
+    // (RFC 0002 D-SELFREVOKE). Dev-mode rows have no identity on either side,
+    // so is_own is false for all of them and revoking stays a curl away.
+    item.innerHTML = `
+      <span class="plug-name">${escapeHtml(c.name)}${c.is_own ? `<span class="plug-own">yours</span>` : ""}</span>
+      <span class="plug-spec">${escapeHtml(c.model_name)} · ${escapeHtml(c.provider)} · ${escapeHtml(c.tier)}</span>
+      <span class="plug-attest"></span>
+      ${c.is_own ? `<button class="copy revoke" type="button">Revoke</button>` : ""}
+      <span class="plug-status" role="status"></span>`;
+
+    if (c.is_own) {
+      item.querySelector(".revoke").addEventListener("click", () => revokeClient(item, c));
+    }
+    return item;
+  }
+
+  /* Touch only what changed, so a row nobody is looking at stays still. */
+  function updateClientRow(item, c) {
+    // A revoke in flight owns this row until it finishes. A poll tick still
+    // sees the client for as long as the DELETE takes, and letting it write
+    // would replace "Revoking…" with a countdown and re-enable a button under
+    // the pointer.
+    if (item.dataset.revoking === "true") return;
+
+    if (item.dataset.status !== c.status) item.dataset.status = c.status;
+    const stale = String(Boolean(c.access_is_stale));
+    if (item.dataset.stale !== stale) item.dataset.stale = stale;
+    const near = String(nearExpiry(c));
+    if (item.dataset.nearExpiry !== near) item.dataset.nearExpiry = near;
+
+    const attest = item.querySelector(".plug-attest");
+    const text = attestationText(c);
+    if (attest.textContent !== text) attest.textContent = text;
+  }
+
+  /* Stale and near-expiry are exclusive: a client past its deadline is not the
+     far end of the warning, it is the thing the warning was about. Reporting
+     both would put two live flags on one row and leave the stronger one
+     competing with the weaker for the same glance. */
+  function nearExpiry(c) {
+    if (c.access_is_stale) return false;
+    if (!c.access_refreshed_at || !c.access_expires_at) return false;
+    const refreshed = Date.parse(c.access_refreshed_at);
+    const expires = Date.parse(c.access_expires_at);
+    // Named `span`, not `window`: a local called window would shadow the global
+    // one this file calls confirm() on a few lines below.
+    const span = expires - refreshed;
+    if (!(span > 0)) return false;
+    return expires - Date.now() <= span * NEAR_EXPIRY_FRACTION;
+  }
+
+  function attestationText(c) {
+    // No GitHub account behind this client — a dev-mode enrolment, or a row
+    // predating GitHub-derived admission. Said plainly rather than left blank:
+    // an empty line reads as a value that failed to load.
+    if (!c.access_refreshed_at) return "not GitHub-linked";
+    const now = Date.now();
+    const age = `attested ${humanDuration(now - Date.parse(c.access_refreshed_at))} ago`;
+    if (c.access_is_stale) return `${age} · expired — check in again`;
+    if (!c.access_expires_at) return age;
+    return `${age} · expires in ${humanDuration(Date.parse(c.access_expires_at) - now)}`;
+  }
+
+  /* One coarse unit, never two. "7h" is the whole point of the reading — an
+     operator scanning the rail wants to know which box goes dark first, not
+     that it has 7h 14m 3s. */
+  function humanDuration(ms) {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 90) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes}m`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${hours}h`;
+    return `${Math.round(hours / 24)}d`;
+  }
+
+  async function revokeClient(item, c) {
+    // Native confirm, deliberately: this page has no modal of its own, and a
+    // hard delete of somebody's working machine is not the place to introduce
+    // one whose focus trapping nothing here tests.
+    if (!window.confirm(
+      `Revoke ${c.name}? Its token stops working immediately and any round it is holding goes back on the card. ` +
+      `This cannot be undone — the machine has to enrol again.`
+    )) return;
+
+    const button = item.querySelector(".revoke");
+    item.dataset.revoking = "true";
+    button.disabled = true;
+    setPlugStatus(item, "Revoking…", null);
+    try {
+      const response = await fetch(`${HUB}/clients/${encodeURIComponent(c.id)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (response.status === 401) {
+        // The session is gone — a different fact from "you may not do this",
+        // and the only one of the two that should take the page back to
+        // sign-in. The poll loop and savePolicy treat 401 the same way.
+        clearSession();
+        setHealth("unauthorized");
+        showLogin();
+        return;
+      }
+      // 404 is an ordinary outcome here, not an error. The hub answers it for
+      // "no such client" and "not yours" alike (RFC 0001 D-404) and this page
+      // must not try to tell them apart — from the rail, either one means the
+      // row is gone, which is also what a second dashboard revoking the same
+      // box a moment earlier looks like.
+      if (response.status === 204 || response.status === 404) {
+        // Released before the redraw, not in `finally`: the renders below must
+        // be free to touch this row again, and a row still marked in-flight
+        // would sit on "Revoking…" until the poll after next.
+        delete item.dataset.revoking;
+        // Drop it locally and redraw rather than leaving a dead row up for the
+        // rest of the poll interval; the poll that follows is still what
+        // reconciles with the hub, which remains the authority on the roster.
+        latestClients = latestClients.filter((row) => row.id !== c.id);
+        renderRoster(latestClients);
+        await poll();
+        return;
+      }
+      const body = await response.json().catch(() => ({}));
+      setPlugStatus(item, errorDetail(body, "Could not revoke this client."), "error");
+    } catch {
+      setPlugStatus(item, "Could not reach the hub to revoke.", "error");
+    } finally {
+      delete item.dataset.revoking;
+      button.disabled = false;
+    }
+  }
+
+  function setPlugStatus(item, message, tone) {
+    const status = item.querySelector(".plug-status");
+    status.textContent = message;
+    if (tone) status.dataset.tone = tone;
+    else delete status.dataset.tone;
   }
 
   /* ---- policy floors -----------------------------------------------------

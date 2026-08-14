@@ -1,0 +1,61 @@
+# The repo enforces its own lint/type gates at commit time — the same checks
+# CI runs, with the same pinned toolchains (each subproject's uv.lock), so a
+# commit that passes here does not bounce off CI later.
+#
+# One-time setup:   uv tool install pre-commit && pre-commit install
+# Worktrees share the installed hook, so commits made from cw worker
+# worktrees are gated by these hooks too.
+#
+# `repo: local` + uv on purpose, not the ruff/mypy mirror repos: mirrors pin
+# their own tool versions, which drift from the versions our lockfiles pin.
+# `--frozen` matches CI's `uv sync --frozen`: a stale lockfile fails loudly
+# instead of being silently rewritten as a side effect of `git commit`.
+#
+# Hub hooks scope to review_bingo_hub/ because that is exactly what CI lints
+# (`ruff check review_bingo_hub`, `ruff format --check review_bingo_hub`,
+# `mypy review_bingo_hub` from hub/) — _tasks.py, alembic/, scripts/ are
+# deliberately outside the gate, and explicitly-passed filenames would
+# otherwise override ruff's own exclude list. Client CI lints `.`, so the
+# client hooks take the whole subtree.
+#
+# CI stays authoritative; one deliberate divergence: the ruff-format hooks
+# auto-fix locally (fail the commit, leave the fix in the tree to re-stage)
+# where CI only verifies with --check.
+repos:
+  - repo: local
+    hooks:
+      - id: hub-ruff-check
+        name: ruff check (hub)
+        language: system
+        entry: uv run --frozen --project hub ruff check
+        files: ^hub/review_bingo_hub/.*\.py$
+      - id: hub-ruff-format
+        name: ruff format (hub)
+        language: system
+        entry: uv run --frozen --project hub ruff format
+        files: ^hub/review_bingo_hub/.*\.py$
+      - id: hub-mypy
+        name: mypy (hub)
+        language: system
+        # cd so mypy discovers hub/pyproject.toml the same way CI does.
+        entry: bash -c 'cd hub && uv run --frozen mypy review_bingo_hub'
+        files: ^hub/review_bingo_hub/.*\.py$
+        pass_filenames: false
+        require_serial: true
+      - id: client-ruff-check
+        name: ruff check (client)
+        language: system
+        entry: uv run --frozen --project client ruff check
+        files: ^client/.*\.py$
+      - id: client-ruff-format
+        name: ruff format (client)
+        language: system
+        entry: uv run --frozen --project client ruff format
+        files: ^client/.*\.py$
+      - id: client-mypy
+        name: mypy (client)
+        language: system
+        entry: bash -c 'cd client && uv run --frozen mypy .'
+        files: ^client/.*\.py$
+        pass_filenames: false
+        require_serial: true

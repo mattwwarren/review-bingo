@@ -67,3 +67,19 @@ copy of its answer. A hub-side "kick this person off" button would be a second
 authority over the same question, one that can disagree with GitHub and always
 in the more dangerous direction: still granting what GitHub has revoked. One
 authority, one answer.
+
+## Development
+
+Each subdir owns its toolchain (`hub/`, `client/` — uv projects with pinned
+lockfiles). The repo enforces its lint and type gates at commit time via
+pre-commit, running the same gates CI runs with the same locked tool
+versions (one deliberate difference: the format hooks auto-fix locally,
+where CI only verifies):
+
+```bash
+uv tool install pre-commit
+pre-commit install        # once per clone; worktrees share the hook
+```
+
+CI remains authoritative — the hooks exist so a formatting or typing failure
+surfaces before push instead of bouncing off a CI round-trip.

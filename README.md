@@ -72,8 +72,9 @@ authority, one answer.
 
 Each subdir owns its toolchain (`hub/`, `client/` — uv projects with pinned
 lockfiles). The repo enforces its lint and type gates at commit time via
-pre-commit, running the same commands CI runs with the same locked tool
-versions:
+pre-commit, running the same gates CI runs with the same locked tool
+versions (one deliberate difference: the format hooks auto-fix locally,
+where CI only verifies):
 
 ```bash
 uv tool install pre-commit

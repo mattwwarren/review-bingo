@@ -188,9 +188,7 @@ class ReviewClientRosterRead(ReviewClientRead):
         description="When this client's GitHub repo access was last re-read; None with no linked identity"
     )
     access_expires_at: datetime | None = Field(
-        description=(
-            "When this client's cached access goes too stale to lease against; None with no linked identity"
-        )
+        description=("When this client's cached access goes too stale to lease against; None with no linked identity")
     )
     access_is_stale: bool = Field(
         description="Whether that deadline has already passed. False with no linked identity — nothing to age"

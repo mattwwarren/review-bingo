@@ -12,13 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 from sqlmodel import col
 
-from review_bingo_hub.models.github_identity import IdentityRepoAccess
+from review_bingo_hub.models.github_identity import GithubIdentity, IdentityRepoAccess
 from review_bingo_hub.models.review_client import (
     ClientStatus,
     ReviewClient,
     ReviewClientCreate,
+    ReviewClientRead,
+    ReviewClientRosterRead,
 )
-from review_bingo_hub.services.identity_service import accessible_repo_names
+from review_bingo_hub.services.identity_service import ScopedCaller, access_freshness, accessible_repo_names
 
 
 def hash_token(token: str) -> str:
@@ -130,3 +132,66 @@ async def list_clients(
 
     result = await session.execute(query)
     return list(result.scalars().all())
+
+
+async def list_clients_with_attestation(
+    session: AsyncSession,
+    caller: ScopedCaller,
+    offset: int = 0,
+    limit: int = 100,
+) -> list[ReviewClientRosterRead]:
+    """The roster, plus what the dashboard needs to manage it (RFC 0002 B3).
+
+    A wrapper around `list_clients` rather than a widening of it, and the
+    distinction is load-bearing: *which* rows a caller may see is a security
+    answer with its own tests, and this function must not be able to change it.
+    It re-derives no scoping — it decorates whatever came back.
+
+    Two facts get added per row. `is_own` compares identities, never machines,
+    because the GitHub account is the unit of admission: one person's second box
+    is still theirs to revoke, and `DELETE /clients/{id}` authorizes on exactly
+    this comparison. The `caller.identity_id is not None` guard is the whole
+    point of writing it out — under dev-mode enrolment every client's
+    `identity_id` is NULL, so a bare equality would report every dev-mode
+    machine as every other one's own and put a revoke button on all of them.
+
+    The attestation fields come from one `WHERE id IN (...)` over the distinct
+    identities on the page, not a lookup per row: the roster is polled twice a
+    second by every open dashboard, and a per-row query is the N+1 that shape
+    invites. A row whose identity cannot be found reports `(None, False)` — the
+    same shape a dev-mode row gets, because in both cases there is no snapshot
+    to age, and inventing a deadline for one would render as a countdown to
+    nothing.
+    """
+    clients = await list_clients(
+        session, identity_id=caller.identity_id, own_client_id=caller.client_id, offset=offset, limit=limit
+    )
+
+    identity_ids = {c.identity_id for c in clients if c.identity_id is not None}
+    refreshed_by_identity: dict[UUID, datetime] = {}
+    if identity_ids:
+        rows = await session.execute(
+            select(GithubIdentity.id, GithubIdentity.access_refreshed_at).where(
+                col(GithubIdentity.id).in_(identity_ids)
+            )
+        )
+        refreshed_by_identity = {identity_id: refreshed_at for identity_id, refreshed_at in rows.all()}
+
+    roster: list[ReviewClientRosterRead] = []
+    for client in clients:
+        refreshed_at = refreshed_by_identity.get(client.identity_id) if client.identity_id is not None else None
+        expires_at, is_stale = access_freshness(refreshed_at) if refreshed_at is not None else (None, False)
+        roster.append(
+            ReviewClientRosterRead(
+                # Through ReviewClientRead rather than straight off the row, the
+                # same way check_in_endpoint composes its own subclass: the
+                # public view is where "never the token hash" is decided, and
+                # widening the roster must not be a way around that.
+                **ReviewClientRead.model_validate(client).model_dump(),
+                is_own=caller.identity_id is not None and client.identity_id == caller.identity_id,
+                access_refreshed_at=refreshed_at,
+                access_expires_at=expires_at,
+                access_is_stale=is_stale,
+            )
+        )
+    return roster

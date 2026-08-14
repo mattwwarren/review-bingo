@@ -205,6 +205,26 @@ def _snapshot_is_stale(refreshed_at: datetime) -> bool:
     return datetime.now(UTC) - refreshed_at > timedelta(seconds=settings.identity_access_ttl_seconds)
 
 
+def access_freshness(refreshed_at: datetime) -> tuple[datetime, bool]:
+    """(access_expires_at, access_is_stale) for a raw `GithubIdentity.access_refreshed_at`.
+
+    Shared with `client_service`'s roster enrichment so the roster's per-row
+    staleness answer cannot drift from `/auth/me`'s and `identity_access_is_stale`'s
+    — all three now reduce to `_snapshot_is_stale`. Public where that one is
+    private because this is the cross-module form: a caller outside this file
+    needs the deadline as well as the verdict, and reaching for the private name
+    to compute one of them itself is exactly the drift the extraction prevents.
+
+    The deadline is returned rather than the TTL that produced it. The roster
+    renders one row per machine, and a constant repeated per row is the shape
+    `ReviewClientCheckInRead` already declined; an absolute instant is also the
+    only form a "expires in 12m" reading can be computed from without the reader
+    knowing the hub's configuration.
+    """
+    expires_at = refreshed_at + timedelta(seconds=settings.identity_access_ttl_seconds)
+    return expires_at, _snapshot_is_stale(refreshed_at)
+
+
 async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) -> bool:
     """Whether this client's cached GitHub access is too old to lease against.
 

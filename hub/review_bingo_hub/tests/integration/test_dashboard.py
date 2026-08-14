@@ -66,6 +66,33 @@ async def test_dashboard_serves_policy_panel_markup(client: AsyncClient) -> None
 
 
 @pytest.mark.asyncio
+async def test_dashboard_serves_client_management_markup(client: AsyncClient) -> None:
+    """The page a browser receives carries the B3 roster controls, not just their CSS.
+
+    Same surface and same limit as the policy-panel test above: served-HTML
+    assertions are the whole test surface `dashboard/index.html` has, so what is
+    pinned here is the set of literals whose absence would break client
+    management end to end — the container the rows render into, the revoke
+    affordance itself, the DELETE call it makes, and the confirmation in front
+    of it. A revoke that fired without asking is the one failure mode of this
+    panel that cannot be undone, so the confirm is asserted rather than trusted.
+
+    Runtime behaviour (keyed row reuse, the mid-revoke render skip, near-expiry
+    flagging) is not assertable from here and is not claimed to be.
+    """
+    response = await client.get("/dashboard")
+
+    assert response.status_code == HTTPStatus.OK
+    assert 'id="roster"' in response.text
+    assert "Revoke" in response.text
+    # The endpoint A2 (#44) already built — the dashboard adds no route of its
+    # own, so this template literal is the whole integration point.
+    assert "`${HUB}/clients/${" in response.text
+    assert 'method: "DELETE"' in response.text
+    assert "confirm(" in response.text
+
+
+@pytest.mark.asyncio
 async def test_dashboard_says_so_when_it_was_not_deployed(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

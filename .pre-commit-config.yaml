@@ -1,0 +1,55 @@
+# The repo enforces its own lint/type gates at commit time — the same checks
+# CI runs, with the same pinned toolchains (each subproject's uv.lock), so a
+# commit that passes here does not bounce off CI later.
+#
+# One-time setup:   uv tool install pre-commit && pre-commit install
+# Worktrees share the installed hook, so commits made from cw worker
+# worktrees are gated by these hooks too.
+#
+# `repo: local` + uv on purpose, not the ruff/mypy mirror repos: mirrors pin
+# their own tool versions, which drift from the versions our lockfiles pin.
+# CI stays authoritative; these hooks exist so failures surface before push.
+repos:
+  - repo: local
+    hooks:
+      - id: hub-ruff-check
+        name: ruff check (hub)
+        language: system
+        entry: uv run --project hub ruff check
+        files: ^hub/.*\.py$
+        # Mirror hub/pyproject.toml's extend-exclude: explicitly-passed
+        # filenames override ruff's own exclude list.
+        exclude: ^hub/(stubs/|alembic/versions/)
+      - id: hub-ruff-format
+        name: ruff format (hub)
+        language: system
+        entry: uv run --project hub ruff format
+        # CI formats only the package (`ruff format --check review_bingo_hub`
+        # from hub/) — alembic/ and scripts/ are deliberately out of scope.
+        files: ^hub/review_bingo_hub/.*\.py$
+      - id: hub-mypy
+        name: mypy (hub)
+        language: system
+        # cd so mypy discovers hub/pyproject.toml the same way CI does.
+        entry: bash -c 'cd hub && uv run mypy review_bingo_hub'
+        files: ^hub/.*\.py$
+        exclude: ^hub/(stubs/|alembic/versions/)
+        pass_filenames: false
+        require_serial: true
+      - id: client-ruff-check
+        name: ruff check (client)
+        language: system
+        entry: uv run --project client ruff check
+        files: ^client/.*\.py$
+      - id: client-ruff-format
+        name: ruff format (client)
+        language: system
+        entry: uv run --project client ruff format
+        files: ^client/.*\.py$
+      - id: client-mypy
+        name: mypy (client)
+        language: system
+        entry: bash -c 'cd client && uv run mypy .'
+        files: ^client/.*\.py$
+        pass_filenames: false
+        require_serial: true

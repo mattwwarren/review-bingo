@@ -23,8 +23,8 @@ interestingly an agent — picks the result up and acts on it.
    must poll `GET /jobs` and diff, tracking "last seen" client-side. There
    is no "review done" signal to subscribe to.
 2. **Job intent is inexpressible.** The job carries
-   `{repo, pr_number, head_sha, event_action, pr_title}` and the client
-   declares `{model, provider, quant, tier}`. "What kind of review" lives
+   `{repo_full_name, pr_number, head_sha, event_action, pr_title}` and the
+   client declares `{model_name, provider, quant, tier}`. "What kind of review" lives
    entirely in the client's `REVIEW_CMD`. There is no way to ask for
    "review this PR with a security lens" — the agentic-native request.
 3. **The contributor side has no on-ramp.** The grid is bidirectional by
@@ -49,7 +49,8 @@ interestingly an agent — picks the result up and acts on it.
   newly-inaccessible repos — re-evaluate the access set on each emission,
   and close the stream when the identity's TTL lapses to force a
   reconnect. Event payload is
-  `{job_id, repo, pr_number, head_sha, verdict, summary}`; findings stay
+  `{job_id, repo_full_name, pr_number, head_sha, verdict, summary}`;
+  findings stay
   off the wire (variable shape, can be large) — the event is the poke,
   `GET /jobs/{id}` is the fetch. `job.relayed` is the only event type this
   round; see Out of scope for the rest.
@@ -75,7 +76,7 @@ interestingly an agent — picks the result up and acts on it.
 - **D-TRUST — trust is two-way, identity/allowlist-based, not
   reputation-based.** Reviewers identify themselves: check-in gains a
   runtime identity (Hermes, Claude Code, Codex, an ollama wrapper, …)
-  alongside the existing `{model, provider, quant, tier}` declaration.
+  alongside the existing `{model_name, provider, quant, tier}` declaration.
   Requestors constrain who may review: `RepoPolicy` gains
   `accepted_models` / `accepted_model_groups`, where **model groups** are
   platform-curated named bundles (e.g. `frontier`, `enterprise-approved`)
@@ -93,8 +94,8 @@ interestingly an agent — picks the result up and acts on it.
 
 - **D-REVIEWCMD — the contributor contract is stdin/stdout, and the
   reference lives in-repo.** A `REVIEW_CMD` takes job JSON on stdin
-  (`repo, pr_number, head_sha`, plus `requested_strategies` once A2
-  lands) and emits `{verdict, summary, findings}` on stdout. The
+  (`repo_full_name, pr_number, head_sha`, plus `requested_strategies` once
+  A2 lands) and emits `{verdict, summary, findings}` on stdout. The
   reference implementation ships in `client/examples/` — it splits into
   its own package only when external installs demand separate versioning,
   the same rationale as the repo-structure decision in PITCH.md. It ships
@@ -141,8 +142,9 @@ that leases with its own compute is the full bidirectional picture — one
   simple pass-through (lease → fetch diff via `gh` → review → emit) and
   the two-model cheap-fix/expensive-review loop.
 - Documentation for both wiring paths: CLI
-  (`bingo_client.py loop --review-cmd <script>`) and MCP
-  (`bingo_mcp.py`: `list_jobs → lease_job → report_result`).
+  (`REVIEW_CMD=<script> bingo_client.py loop` — the reviewer command is
+  the `REVIEW_CMD` environment variable; `loop` has no flag for it) and
+  MCP (`bingo_mcp.py`: `list_jobs → lease_job → report_result`).
 - Dry-run default per D-REVIEWCMD.
 
 ### A4 — Model allowlist + model groups (#65)

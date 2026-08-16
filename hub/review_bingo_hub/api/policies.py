@@ -28,7 +28,12 @@ from review_bingo_hub.services.identity_service import (
     authorize_policy_write,
     caller_accessible_repo_names,
 )
-from review_bingo_hub.services.policy_service import get_policy, list_policies, upsert_policy
+from review_bingo_hub.services.policy_service import (
+    UnknownModelGroupError,
+    get_policy,
+    list_policies,
+    upsert_policy,
+)
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -96,8 +101,15 @@ async def upsert_policy_endpoint(
 
     Requires repo admin. `_authorized` carries no value — it is here so the
     check runs as a dependency, before the handler body and before any write.
+
+    An undefined model group is the caller's mistake, not a missing resource:
+    400 rather than 404, and the group names come back in the message so a
+    typo is visible without a second lookup against the operator's registry.
     """
-    policy = await upsert_policy(session, f"{owner}/{repo}", payload)
+    try:
+        policy = await upsert_policy(session, f"{owner}/{repo}", payload)
+    except UnknownModelGroupError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.detail) from exc
     await session.commit()
     return RepoPolicyRead.model_validate(policy)
 

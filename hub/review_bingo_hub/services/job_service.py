@@ -8,12 +8,14 @@ the top of every lease request — no background worker in v1.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy import ColumnElement, Select, select, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped
 from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
@@ -84,6 +86,73 @@ def _strategy_overlap(client: ReviewClient) -> ColumnElement[bool]:
     return sa.or_(
         sa.func.jsonb_array_length(col(ReviewJob.requested_strategies)) == 0,
         col(ReviewJob.requested_strategies).op("?|")(sa.cast(client.offered_strategies, postgresql.ARRAY(sa.Text))),
+    )
+
+
+def _live_policy_list(column: Mapped[Any]) -> ColumnElement[Any]:
+    """One RepoPolicy JSONB list column, read live for the ReviewJob row being considered.
+
+    A correlated scalar subquery rather than a join, for a specific reason: a
+    joined RepoPolicy would enter the `FOR UPDATE SKIP LOCKED` scope of both
+    lease paths, so leasing a job would take a row lock on its repo's policy and
+    a concurrent policy write would start contending with dispatch. Only
+    ReviewJob rows are being leased here, and only they should be locked.
+
+    Coalesces to an empty array for a repo with no policy row at all, which
+    matches `enqueue_job`'s own reading of a missing policy: no policy means no
+    floor, not a floor nobody clears.
+    """
+    return sa.func.coalesce(
+        select(column)
+        .where(col(RepoPolicy.repo_full_name) == col(ReviewJob.repo_full_name))
+        .correlate(ReviewJob)
+        .scalar_subquery(),
+        sa.cast(sa.literal("[]"), postgresql.JSONB),
+    )
+
+
+def _model_allowlist_clause(client: ReviewClient) -> ColumnElement[bool]:
+    """The model-allowlist gate: the job's repo must accept this client's declared model.
+
+    One expression shared by both lease paths, for the reason `_strategy_overlap`
+    is one: naming a job is not a way around a repo's allowlist any more than it
+    is a way around its model floor.
+
+    Read live off RepoPolicy rather than snapshotted onto the job the way
+    `min_tier` and `requested_strategies` are. The two behave differently on
+    purpose: a *tier* floor is a statement about the code as it was when the job
+    was enqueued, while a group's membership is a statement about the operator's
+    current fleet, and an operator who narrows a group must not have to re-PUT
+    every policy that references it before the narrowing takes effect.
+
+    Group membership resolves in Python — `settings.model_groups` is process
+    config, not a table, so there is nothing for SQL to join against. What
+    reaches Postgres is the already-resolved list of groups this client's model
+    belongs to, tested against the policy's `accepted_model_groups` with `?|`
+    ("holds any of these"), beside a `?` ("holds this") on `accepted_models`.
+
+    Same rule, expressed in plain Python for the one caller that already has the
+    policy loaded and isn't running a query: `models.repo_policy.model_allowed`,
+    used by `api.jobs`'s targeted-lease pre-check. Change the matching semantics
+    in one, change them in the other.
+    """
+    matching_groups = [name for name, members in settings.model_groups.items() if client.model_name in members]
+    accepted_models = _live_policy_list(col(RepoPolicy.accepted_models))
+    accepted_groups = _live_policy_list(col(RepoPolicy.accepted_model_groups))
+
+    # Both empty is the match-any sentinel, mirroring `model_allowed`'s first
+    # branch. `sa.false()` for the group half when the client's model is in no
+    # group at all: there is nothing to test `?|` against, and an empty array
+    # literal would be a cast Postgres has no type for here.
+    return sa.or_(
+        sa.and_(
+            sa.func.jsonb_array_length(accepted_models) == 0,
+            sa.func.jsonb_array_length(accepted_groups) == 0,
+        ),
+        accepted_models.op("?")(client.model_name),
+        accepted_groups.op("?|")(sa.cast(matching_groups, postgresql.ARRAY(sa.Text)))
+        if matching_groups
+        else sa.false(),
     )
 
 
@@ -236,13 +305,15 @@ async def reported_jobs_for_client(session: AsyncSession, client_id: UUID) -> li
 async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJob | None:
     """Hand the oldest eligible queued job to a client.
 
-    Eligibility is four independent gates. The policy floor: the job's min_tier
-    must be at or below the client's declared tier. The strategy contract: the
-    job's requested_strategies must be empty or overlap what the client offers.
-    Access: the job's repo must be one the client's GitHub account can reach.
-    And freshness: that access snapshot must not be older than its TTL. All four
-    are resolved here rather than passed in, so no caller can hand this function
-    a wider scope than the client actually has.
+    Eligibility is five independent gates. The policy floor: the job's min_tier
+    must be at or below the client's declared tier. The model allowlist: the
+    repo must accept the client's declared model, by name or through a group.
+    The strategy contract: the job's requested_strategies must be empty or
+    overlap what the client offers. Access: the job's repo must be one the
+    client's GitHub account can reach. And freshness: that access snapshot must
+    not be older than its TTL. All five are resolved here rather than passed in,
+    so no caller can hand this function a wider scope than the client actually
+    has.
 
     FOR UPDATE SKIP LOCKED keeps concurrent leases from colliding.
 
@@ -258,8 +329,9 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
     query = (
         select(ReviewJob)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
-        .where(col(ReviewJob.min_tier).in_(eligible_tiers))
-        .where(_strategy_overlap(client))
+        .where(col(ReviewJob.min_tier).in_(eligible_tiers))  # gate 1: tier floor
+        .where(_model_allowlist_clause(client))  # gate 2: model allowlist (RFC 0003 A4)
+        .where(_strategy_overlap(client))  # gate 3: strategy contract (RFC 0003 A2)
         .order_by(col(ReviewJob.created_at))
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -280,9 +352,10 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
     Backs "pick this one" flows (dashboard selection, MCP clients) where the
     caller already knows which job it wants. The eligibility rules are the
     same as `lease_next_job` — naming a job is not a way around a repo's model
-    floor, nor its strategy contract, nor around its access set, nor around that
-    set's TTL — and the state check lives inside the locking SELECT so two
-    callers racing for the same job resolve to exactly one winner.
+    floor, nor its model allowlist, nor its strategy contract, nor around its
+    access set, nor around that set's TTL — and the state check lives inside the
+    locking SELECT so two callers racing for the same job resolve to exactly one
+    winner.
 
     Raises:
         StaleIdentityAccessError: the access snapshot is past its TTL.
@@ -295,8 +368,9 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
         select(ReviewJob)
         .where(col(ReviewJob.id) == job_id)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
-        .where(col(ReviewJob.min_tier).in_(eligible_tiers))
-        .where(_strategy_overlap(client))
+        .where(col(ReviewJob.min_tier).in_(eligible_tiers))  # gate 1: tier floor
+        .where(_model_allowlist_clause(client))  # gate 2: model allowlist (RFC 0003 A4)
+        .where(_strategy_overlap(client))  # gate 3: strategy contract (RFC 0003 A2)
         .limit(1)
         .with_for_update(skip_locked=True)
     )

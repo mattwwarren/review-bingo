@@ -66,6 +66,22 @@ class RepoPolicyBase(SQLModel):
         description="Minimum client tier allowed to lease this repo's jobs",
     )
     enabled: bool = Field(default=True, description="Disabled repos accept webhooks but queue no jobs")
+
+
+class _ModelAllowlistFields(SQLModel):
+    """`accepted_models`/`accepted_model_groups`'s one canonical declaration, isolated from `RepoPolicyBase`.
+
+    Same reason `_DefaultStrategiesField` exists, and for the same operator
+    directive that moved these fields here: `RepoPolicyUpsert` needs to widen
+    both to `list[str] | None` (the omitted-vs-explicit-empty distinction
+    `upsert_policy` relies on for `default_strategies` already) without that
+    becoming an LSP-violating override of a mutable field's type on a direct
+    parent -- mypy correctly rejects that shape. A PUT that only bumps
+    `min_tier` must not silently reset a repo's model allowlist back to
+    match-any, the same trust-boundary-widening hazard `default_strategies`
+    was already protected against.
+    """
+
     accepted_models: list[str] = Field(
         default_factory=list,
         sa_column=sa.Column(JSONB(), server_default="[]", nullable=False),
@@ -102,7 +118,7 @@ class _DefaultStrategiesField(SQLModel):
     )
 
 
-class RepoPolicy(TimestampedTable, RepoPolicyBase, _DefaultStrategiesField, table=True):
+class RepoPolicy(TimestampedTable, RepoPolicyBase, _DefaultStrategiesField, _ModelAllowlistFields, table=True):
     __tablename__ = "repo_policy"
 
     repo_full_name: str = Field(index=True, unique=True, description="owner/repo")
@@ -117,6 +133,22 @@ class RepoPolicyUpsert(RepoPolicyBase):
             "Review strategies snapshotted onto a new job's requested_strategies at enqueue time; "
             "omitted leaves default_strategies unchanged on an existing policy (or empty on a new "
             "one), an explicit empty list clears it"
+        ),
+    )
+    accepted_models: list[str] | None = Field(
+        default=None,
+        description=(
+            "Exact model names allowed to lease this repo's jobs; omitted leaves the existing "
+            "allowlist unchanged on an existing policy (or empty on a new one), an explicit empty "
+            "list clears it to match-any"
+        ),
+    )
+    accepted_model_groups: list[str] | None = Field(
+        default=None,
+        description=(
+            "Model-group names allowed to lease this repo's jobs; omitted leaves the existing "
+            "allowlist unchanged on an existing policy (or empty on a new one), an explicit empty "
+            "list clears it to match-any"
         ),
     )
 
@@ -140,7 +172,7 @@ class RepoPolicyUpsert(RepoPolicyBase):
         return value
 
 
-class RepoPolicyRead(RepoPolicyBase, _DefaultStrategiesField):
+class RepoPolicyRead(RepoPolicyBase, _DefaultStrategiesField, _ModelAllowlistFields):
     id: UUID
     repo_full_name: str
     created_at: datetime

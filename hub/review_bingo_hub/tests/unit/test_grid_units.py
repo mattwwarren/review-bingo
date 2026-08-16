@@ -7,7 +7,7 @@ from typing import ClassVar
 import pytest
 
 from review_bingo_hub.api.webhooks import verify_signature
-from review_bingo_hub.models.repo_policy import RepoPolicyBase, model_allowed
+from review_bingo_hub.models.repo_policy import _ModelAllowlistFields, model_allowed
 from review_bingo_hub.models.review_client import (
     MODEL_TIER_RANK,
     ModelTier,
@@ -103,10 +103,10 @@ class TestRepoPolicyAllowlistDefaults:
     """
 
     def test_accepted_models_defaults_to_empty(self) -> None:
-        assert RepoPolicyBase().accepted_models == []
+        assert _ModelAllowlistFields().accepted_models == []
 
     def test_accepted_model_groups_defaults_to_empty(self) -> None:
-        assert RepoPolicyBase().accepted_model_groups == []
+        assert _ModelAllowlistFields().accepted_model_groups == []
 
 
 class TestModelAllowed:

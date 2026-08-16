@@ -899,6 +899,38 @@ async def test_upsert_policy_rejects_unknown_model_group(client: AsyncClient, mo
 
 
 @pytest.mark.asyncio
+async def test_upsert_policy_partial_put_preserves_allowlist(client: AsyncClient) -> None:
+    """A PUT that omits the allowlist fields must not silently widen them to match-any.
+
+    Regression guard for the same class of bug `default_strategies` was
+    already protected against: `accepted_models`/`accepted_model_groups` now
+    get the identical omitted-preserves/explicit-clears treatment on
+    RepoPolicyUpsert, so a PUT that only bumps `min_tier` (a client unaware
+    the allowlist fields even exist) leaves a previously-set allowlist
+    intact, and only an explicit `[]` clears it back to match-any.
+    """
+    repo = "acme/allowlist-partial-put"
+    response = await client.put(
+        f"/policies/{repo}", json={"accepted_models": ["claude-opus-4"], "accepted_model_groups": []}
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_models"] == ["claude-opus-4"]
+
+    # Omitting the allowlist fields entirely -- bumping only min_tier -- must
+    # leave the previously-set allowlist untouched, not reset it to [].
+    response = await client.put(f"/policies/{repo}", json={"min_tier": "frontier"})
+    assert response.status_code == HTTPStatus.OK
+    body = response.json()
+    assert body["min_tier"] == "frontier"
+    assert body["accepted_models"] == ["claude-opus-4"]
+
+    # An explicit [] is the deliberate clear, distinct from omission.
+    response = await client.put(f"/policies/{repo}", json={"accepted_models": []})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_models"] == []
+
+
+@pytest.mark.asyncio
 async def test_lease_specific_job_respects_model_allowlist(client: AsyncClient) -> None:
     """Naming a job must not be a way around its repo's model allowlist."""
     repo = "acme/allowlist-target"

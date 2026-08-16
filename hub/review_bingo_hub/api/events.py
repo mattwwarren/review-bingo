@@ -23,13 +23,11 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from review_bingo_hub.api.clients import ScopedCallerDep
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.core.event_bus import EventBus, EventBusFullError, Subscription
 from review_bingo_hub.core.logging import get_logging_context
-from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.event import EventType, JobRelayedEvent
 from review_bingo_hub.services.identity_service import identity_id_access_is_stale
 
@@ -49,9 +47,27 @@ def _frame(event: JobRelayedEvent) -> str:
     return f"event: {EventType.JOB_RELAYED}\ndata: {event.model_dump_json()}\n\n"
 
 
+async def _access_is_stale(request: Request, subscription: Subscription) -> bool:
+    """Ask the staleness question on a session that lives no longer than the question.
+
+    Deliberately *not* a `SessionDep` on the endpoint. A dependency-supplied
+    session is released only when the response completes, and this response is
+    designed never to complete on its own — so every open stream would hold a
+    pooled connection for its entire lifetime, and `max_sse_subscribers` (200)
+    would exhaust `db_pool_size + db_max_overflow` (15) at the sixteenth
+    dashboard tab, blocking the whole hub rather than just the stream.
+
+    Reaching for `app.state.async_session_maker` directly is the existing way
+    out of that, already used where work happens outside a request's own
+    lifecycle (`core/activity_logging.py`, and the test suite's own middleware).
+    """
+    async with request.app.state.async_session_maker() as session:
+        stale: bool = await identity_id_access_is_stale(session, subscription.identity_id)
+    return stale
+
+
 async def _event_stream(
     request: Request,
-    session: AsyncSession,
     bus: EventBus,
     subscription: Subscription,
 ) -> AsyncIterator[str]:
@@ -69,7 +85,7 @@ async def _event_stream(
         while True:
             if await request.is_disconnected():
                 return
-            if await identity_id_access_is_stale(session, subscription.identity_id):
+            if await _access_is_stale(request, subscription):
                 # Closed, not filtered: the caller reconnects, and reconnecting
                 # is what makes it present a credential the hub can re-read.
                 LOGGER.info("event_stream_closed_stale", extra=log_extra)
@@ -85,7 +101,7 @@ async def _event_stream(
 
 
 @router.get("/events")
-async def events_endpoint(request: Request, session: SessionDep, caller: ScopedCallerDep) -> StreamingResponse:
+async def events_endpoint(request: Request, caller: ScopedCallerDep) -> StreamingResponse:
     """Stream job-lifecycle events (SSE) for repos this caller can reach; access is re-checked on every event."""
     bus: EventBus = request.app.state.event_bus
     try:
@@ -97,6 +113,6 @@ async def events_endpoint(request: Request, session: SessionDep, caller: ScopedC
         ) from exc
 
     return StreamingResponse(
-        _event_stream(request, session, bus, subscription),
+        _event_stream(request, bus, subscription),
         media_type="text/event-stream",
     )

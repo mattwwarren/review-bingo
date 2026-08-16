@@ -45,8 +45,19 @@ def pr_payload(
     }
 
 
-async def register_and_check_in(client: AsyncClient, name: str, tier: str) -> tuple[str, dict[str, str]]:
-    """Register a grid client of the given tier, check it in, return (id, auth headers)."""
+async def register_and_check_in(
+    client: AsyncClient,
+    name: str,
+    tier: str,
+    strategies: list[str] | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Register a grid client of the given tier, check it in, return (id, auth headers).
+
+    `strategies` is threaded into the check-in body as `offered_strategies` only
+    when supplied — None sends the bodiless check-in every existing caller
+    already sends, which is the omission case the endpoint treats as "leave
+    whatever is persisted alone".
+    """
     response = await client.post(
         "/clients",
         json={"name": name, "model_name": "test-model", "provider": "test", "tier": tier},
@@ -54,7 +65,10 @@ async def register_and_check_in(client: AsyncClient, name: str, tier: str) -> tu
     assert response.status_code == HTTPStatus.CREATED
     body = response.json()
     headers = {"Authorization": f"Bearer {body['token']}"}
-    response = await client.post("/clients/check-in", headers=headers)
+    if strategies is None:
+        response = await client.post("/clients/check-in", headers=headers)
+    else:
+        response = await client.post("/clients/check-in", headers=headers, json={"offered_strategies": strategies})
     assert response.status_code == HTTPStatus.OK
     return body["client"]["id"], headers
 
@@ -482,3 +496,208 @@ async def test_default_test_client_registers_under_dev_mode(client: AsyncClient)
 
     _, headers = await register_and_check_in(client, "dev-mode-client", "standard")
     assert headers["Authorization"] != PLACEHOLDER_AUTH_HEADER
+
+
+# --- Review strategy contract (RFC 0003 A2) -------------------------------------
+#
+# The second dispatch gate, stacked beside the tier floor: a repo declares which
+# review strategies its jobs want, a client declares which it is willing to run,
+# and a lease requires the two to overlap. Empty on the job side means "any".
+
+
+@pytest.mark.asyncio
+async def test_policy_accepts_registry_and_custom_default_strategies(client: AsyncClient) -> None:
+    response = await client.put(
+        "/policies/acme/strategy-vocab", json={"default_strategies": ["security", "custom:my-lens"]}
+    )
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["default_strategies"] == ["security", "custom:my-lens"]
+
+
+@pytest.mark.asyncio
+async def test_policy_rejects_an_out_of_vocabulary_default_strategy(client: AsyncClient) -> None:
+    """Case matters — the registry is exact-match, so 'Security' is not 'security'."""
+    response = await client.put("/policies/acme/strategy-badcase", json={"default_strategies": ["Security"]})
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.asyncio
+async def test_policy_rejects_a_custom_strategy_with_no_name(client: AsyncClient) -> None:
+    response = await client.put("/policies/acme/strategy-badcustom", json={"default_strategies": ["custom:"]})
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+@pytest.mark.asyncio
+async def test_policy_defaults_strategies_to_empty_when_omitted(client: AsyncClient) -> None:
+    response = await client.put("/policies/acme/strategy-omitted", json={"min_tier": "standard"})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["default_strategies"] == []
+
+
+@pytest.mark.asyncio
+async def test_repo_policy_default_strategies_snapshot_onto_enqueued_job(client: AsyncClient) -> None:
+    """A job carries what its repo asked for *at enqueue time*, not the current policy."""
+    repo = "acme/strategy-snapshot"
+    response = await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    assert response.status_code == HTTPStatus.OK
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="snapshot-sha-1"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "snapshot-reader", "frontier", ["security"])
+    response = await client.get(f"/jobs/{job_id}", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["requested_strategies"] == ["security"]
+
+    # Re-pointing the policy leaves work already in the queue exactly where it was.
+    response = await client.put(f"/policies/{repo}", json={"default_strategies": ["shallow"]})
+    assert response.status_code == HTTPStatus.OK
+    response = await client.get(f"/jobs/{job_id}", headers=headers)
+    assert response.json()["requested_strategies"] == ["security"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_gate_blocks_client_with_no_matching_offered_strategy(client: AsyncClient) -> None:
+    repo = "acme/strategy-gate"
+    await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="gate-sha-1"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    # Frontier tier on both clients, so the strategy gate is the only thing
+    # that can account for the difference between them.
+    _, mismatched = await register_and_check_in(client, "gate-mismatch", "frontier", ["shallow"])
+    response = await client.post("/jobs/lease", headers=mismatched)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() is None
+
+    _, matched = await register_and_check_in(client, "gate-match", "frontier", ["security", "shallow"])
+    response = await client.post("/jobs/lease", headers=matched)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_strategy_gate_is_match_any_not_subset(client: AsyncClient) -> None:
+    """One shared strategy is enough; a client need not offer everything a job asked for."""
+    repo = "acme/strategy-any"
+    await client.put(f"/policies/{repo}", json={"default_strategies": ["security", "full-loop"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="any-sha-1"), headers=PR_WEBHOOK_HEADERS
+    )
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "any-overlap", "frontier", ["full-loop"])
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_empty_requested_strategies_matches_any_client(client: AsyncClient) -> None:
+    """A repo with no strategy policy stays leasable by a client that offered none."""
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(sha="no-strategy-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "no-strategy-client", "frontier", [])
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+    assert lease["job"]["requested_strategies"] == []
+
+
+@pytest.mark.asyncio
+async def test_targeted_lease_still_enforces_the_strategy_gate(client: AsyncClient) -> None:
+    """Naming a job must not be a way around its repo's strategy contract."""
+    repo = "acme/strategy-target"
+    await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="strategy-target-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "strategy-target-client", "frontier", ["shallow"])
+    response = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+    assert response.status_code == HTTPStatus.FORBIDDEN
+    detail = response.json()["detail"]
+    # Distinguishable from the tier-floor 403: it names strategies, not tiers.
+    assert "security" in detail
+    assert "shallow" in detail
+    assert "tier" not in detail.lower()
+
+    response = await client.get(f"/jobs/{job_id}", headers=headers)
+    assert response.json()["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_check_in_omitting_offered_strategies_leaves_it_unchanged(client: AsyncClient) -> None:
+    """A plain heartbeat is not a declaration that this client offers nothing."""
+    client_id, headers = await register_and_check_in(client, "sticky-strategies", "frontier", ["security"])
+
+    response = await client.post("/clients/check-in", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["offered_strategies"] == ["security"]
+
+    response = await client.get("/clients", headers=headers)
+    rows = {c["id"]: c for c in response.json()}
+    assert rows[client_id]["offered_strategies"] == ["security"]
+
+
+@pytest.mark.asyncio
+async def test_check_in_explicit_empty_offered_strategies_clears_it(client: AsyncClient) -> None:
+    """An explicit empty list is the way to say 'I offer nothing in particular' — and it takes."""
+    repo = "acme/strategy-clear"
+    await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="clear-sha-1"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+
+    client_id, headers = await register_and_check_in(client, "clearing-client", "frontier", ["security"])
+    response = await client.post("/clients/check-in", headers=headers, json={"offered_strategies": []})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["offered_strategies"] == []
+
+    response = await client.get("/clients", headers=headers)
+    rows = {c["id"]: c for c in response.json()}
+    assert rows[client_id]["offered_strategies"] == []
+
+    # And a cleared client no longer overlaps the job that wants `security`.
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() is None
+
+
+@pytest.mark.asyncio
+async def test_client_roster_lists_offered_strategies(client: AsyncClient) -> None:
+    _, headers = await register_and_check_in(client, "roster-strategy-client", "frontier", ["security", "shallow"])
+    response = await client.get("/clients", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    names = {c["name"]: c for c in response.json()}
+    assert names["roster-strategy-client"]["offered_strategies"] == ["security", "shallow"]
+
+
+@pytest.mark.asyncio
+async def test_check_in_rejects_invalid_offered_strategy(client: AsyncClient) -> None:
+    response = await client.post(
+        "/clients",
+        json={"name": "bad-strategy-client", "model_name": "test-model", "provider": "test", "tier": "frontier"},
+    )
+    assert response.status_code == HTTPStatus.CREATED
+    headers = {"Authorization": f"Bearer {response.json()['token']}"}
+
+    response = await client.post("/clients/check-in", headers=headers, json={"offered_strategies": ["Security"]})
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY

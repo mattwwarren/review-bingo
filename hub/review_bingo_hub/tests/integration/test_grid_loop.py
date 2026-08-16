@@ -899,7 +899,9 @@ async def test_upsert_policy_rejects_unknown_model_group(client: AsyncClient, mo
 
 
 @pytest.mark.asyncio
-async def test_upsert_policy_partial_put_preserves_allowlist(client: AsyncClient) -> None:
+async def test_upsert_policy_partial_put_preserves_allowlist(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A PUT that omits the allowlist fields must not silently widen them to match-any.
 
     Regression guard for the same class of bug `default_strategies` was
@@ -908,13 +910,20 @@ async def test_upsert_policy_partial_put_preserves_allowlist(client: AsyncClient
     RepoPolicyUpsert, so a PUT that only bumps `min_tier` (a client unaware
     the allowlist fields even exist) leaves a previously-set allowlist
     intact, and only an explicit `[]` clears it back to match-any.
+
+    Exercises both fields symmetrically -- `upsert_policy` applies each via
+    its own independently-editable `if payload.X is not None:` block, so a
+    copy-paste slip isolated to one field's block would otherwise go
+    uncaught.
     """
+    monkeypatch.setattr(settings, "model_groups", {"frontier": ["claude-opus-4"]})
     repo = "acme/allowlist-partial-put"
     response = await client.put(
-        f"/policies/{repo}", json={"accepted_models": ["claude-opus-4"], "accepted_model_groups": []}
+        f"/policies/{repo}", json={"accepted_models": ["claude-opus-4"], "accepted_model_groups": ["frontier"]}
     )
     assert response.status_code == HTTPStatus.OK
     assert response.json()["accepted_models"] == ["claude-opus-4"]
+    assert response.json()["accepted_model_groups"] == ["frontier"]
 
     # Omitting the allowlist fields entirely -- bumping only min_tier -- must
     # leave the previously-set allowlist untouched, not reset it to [].
@@ -923,11 +932,14 @@ async def test_upsert_policy_partial_put_preserves_allowlist(client: AsyncClient
     body = response.json()
     assert body["min_tier"] == "frontier"
     assert body["accepted_models"] == ["claude-opus-4"]
+    assert body["accepted_model_groups"] == ["frontier"]
 
     # An explicit [] is the deliberate clear, distinct from omission.
-    response = await client.put(f"/policies/{repo}", json={"accepted_models": []})
+    response = await client.put(f"/policies/{repo}", json={"accepted_models": [], "accepted_model_groups": []})
     assert response.status_code == HTTPStatus.OK
-    assert response.json()["accepted_models"] == []
+    body = response.json()
+    assert body["accepted_models"] == []
+    assert body["accepted_model_groups"] == []
 
 
 @pytest.mark.asyncio

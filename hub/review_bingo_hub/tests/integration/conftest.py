@@ -52,7 +52,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -461,7 +461,7 @@ class SseStream:
         await self._disconnected.wait()
         return {"type": "http.disconnect"}
 
-    async def _send(self, message: dict[str, Any]) -> None:
+    async def _send(self, message: MutableMapping[str, Any]) -> None:
         if message["type"] == "http.response.start":
             self.status_code = message["status"]
             self.headers = {k.decode(): v.decode() for k, v in message.get("headers", [])}

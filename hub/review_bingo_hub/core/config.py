@@ -248,6 +248,28 @@ class Settings(BaseSettings):
             "the snapshot and the credential that could refresh it expire together"
         ),
     )
+    max_sse_subscribers: int = Field(
+        default=200,
+        ge=1,
+        alias="MAX_SSE_SUBSCRIBERS",
+        description=(
+            "How many `GET /events` streams the hub will hold open at once; past it, new connections "
+            "get 503. A bound rather than a tuning knob: every report fans out to each subscriber in "
+            "turn, with an access check apiece, on the reporting client's own request — so this is the "
+            "length of that walk"
+        ),
+    )
+    sse_heartbeat_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        alias="SSE_HEARTBEAT_SECONDS",
+        description=(
+            "How often an idle `GET /events` stream emits a comment line. Doubles as the stream's wake "
+            "cadence, so it also bounds how long a hung-up client or a lapsed access snapshot can go "
+            "unnoticed. A setting rather than a constant so a test can assert on one heartbeat without "
+            "waiting 30 seconds for it"
+        ),
+    )
     dashboard_session_ttl_seconds: int = Field(
         default=12 * 60 * 60,
         ge=60,

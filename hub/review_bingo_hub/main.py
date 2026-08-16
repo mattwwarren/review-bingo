@@ -52,6 +52,7 @@ from sqlalchemy import text
 
 from review_bingo_hub.api.routes import router as api_router
 from review_bingo_hub.core.config import ConfigurationError, settings
+from review_bingo_hub.core.event_bus import EventBus
 from review_bingo_hub.core.logging import LoggingMiddleware
 from review_bingo_hub.core.metrics import metrics_app
 from review_bingo_hub.core.middleware import RequireTokenMiddleware
@@ -99,6 +100,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         pool=pool_config,
     )
     app.state.async_session_maker = create_session_maker(app.state.engine)
+
+    # One bus per process, alongside the engine and session maker for the same
+    # reason they are here: it is per-application state, not a module global, so
+    # a test (or a second app instance) gets its own rather than inheriting one.
+    # Process-local by design — see core/event_bus.py's docstring for what that
+    # costs and why A1 accepts it.
+    app.state.event_bus = EventBus()
 
     # Validate database connectivity (fail fast)
     try:

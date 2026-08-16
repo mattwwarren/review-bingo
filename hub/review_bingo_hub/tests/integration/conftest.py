@@ -33,6 +33,14 @@ rule: `test_client_roster_attestation.py` has to prove two identity-less clients
 never read as each other's own row, and that needs exactly the dev-mode enrolment
 `test_repo_scoped_access.py` already had a helper for.
 
+`identity_id_of` made the same trip on RFC 0003 A1 (#59): `test_job_events.py`
+has to age the *stream owner's* access snapshot, which needs the identity behind
+a client id exactly as `test_repo_scoped_access.py`'s staleness tests already did.
+
+`SseStream`/`open_sse_stream` are new with that same ticket — the SSE stream is
+the first endpoint in this suite whose response never ends on its own, and it
+needs a reader that can observe frames while the connection is still open.
+
 These are plain module-level helpers, not pytest fixtures — callers import
 and call them directly. They sit in `conftest.py` only because that is the
 canonical home for test-support code shared across a directory.
@@ -40,7 +48,12 @@ canonical home for test-support code shared across a directory.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http import HTTPStatus
@@ -49,14 +62,16 @@ from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from review_bingo_hub.core.config import settings
+from review_bingo_hub.core.event_bus import EventBus
 from review_bingo_hub.main import app
 from review_bingo_hub.models.dashboard_session import DashboardSession
 from review_bingo_hub.models.github_identity import GithubIdentity, PermissionLevel
+from review_bingo_hub.models.review_client import ReviewClient
 from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.github_identity_service import (
     DeviceCodeGrant,
@@ -82,6 +97,19 @@ PR_WEBHOOK_HEADERS = {"X-GitHub-Event": "pull_request"}
 ALLOWED = "acme/payments"
 FORBIDDEN = "acme/other-repo"
 UNRELATED = "acme/unrelated"
+
+# How long an SSE assertion waits for something to happen, and how long it waits
+# to be convinced nothing will. Both are wall-clock guards on an in-process
+# stream, not polling intervals: every wait below is an `asyncio.wait_for`, so a
+# working delivery returns the instant it lands and only a broken one spends the
+# whole budget.
+SSE_EVENT_TIMEOUT = 5.0
+SSE_SILENCE_TIMEOUT = 0.5
+
+# The heartbeat cadence tests run at. The 30s default is the production answer;
+# a test asserting "the stream notices within one heartbeat" would otherwise be
+# a 30-second test.
+SSE_TEST_HEARTBEAT_SECONDS = 0.05
 
 
 @dataclass
@@ -209,6 +237,20 @@ async def backdate_access_refreshed_at(session: AsyncSession, identity_id: UUID,
         .values(access_refreshed_at=datetime.now(UTC) - timedelta(seconds=seconds_ago))
     )
     await session.commit()
+
+
+async def identity_id_of(session: AsyncSession, client_id: str) -> UUID:
+    """The GitHub identity a registered client is linked to.
+
+    `expire_all()` first: `expire_on_commit=False` means a row this session read
+    before the enrolment request would still carry its pre-request values.
+    """
+    session.expire_all()
+    grid_client = (
+        await session.execute(select(ReviewClient).where(col(ReviewClient.id) == UUID(client_id)))
+    ).scalar_one()
+    assert grid_client.identity_id is not None
+    return grid_client.identity_id
 
 
 async def expire_session_for(session: AsyncSession, token: str) -> None:
@@ -351,3 +393,200 @@ async def start_dashboard_session(
     poll = await client.post("/auth/device/poll", json={"device_code": start.json()["device_code"]})
     assert poll.status_code == HTTPStatus.OK
     return enrolment_headers(poll.json()["session_token"])
+
+
+@pytest.fixture(autouse=True)
+def fresh_event_bus() -> None:
+    """Give every test in this directory its own `app.state.event_bus`.
+
+    The suite drives the ASGI app without ever running `lifespan`, so nothing
+    would otherwise put a bus on `app.state` at all and every `POST
+    /jobs/{id}/report` in the suite would fail on its absence. Fresh per test
+    rather than once per session because a subscriber leaked out of one test
+    would spend the next one's `max_sse_subscribers` budget.
+    """
+    app.state.event_bus = EventBus()
+
+
+@dataclass(frozen=True)
+class SseEvent:
+    """One parsed SSE frame: its `event:` name and its decoded `data:` payload."""
+
+    name: str | None
+    data: dict[str, Any]
+
+
+class SseStream:
+    """A live `GET /events` connection, driven straight at the ASGI app.
+
+    Deliberately *not* `AsyncClient.stream(...)`. httpx's `ASGITransport` runs
+    the whole application to completion before it returns a response — it
+    appends every `http.response.body` message to a list and only builds the
+    `Response` once `await self.app(...)` returns — so `aiter_lines()` over a
+    stream that never ends on its own yields its first line only after that
+    stream has already closed. A test waiting on it would deadlock against the
+    very connection it is meant to observe.
+
+    Calling the ASGI callable ourselves is what makes frames observable while
+    the connection is open, and it still runs the whole middleware stack
+    (`LoggingMiddleware`, `RequireTokenMiddleware`, rate limiting, CORS) — which
+    matters, because that stack is exactly what R3's disconnect caveat is about.
+
+    Every wait is an `asyncio.wait_for`, never a sleep-poll: a delivered event
+    returns immediately and a missing one fails the test on a bounded clock.
+    """
+
+    def __init__(self) -> None:
+        self.status_code: int | None = None
+        self.headers: dict[str, str] = {}
+        self._chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._buffer = ""
+        self._started = asyncio.Event()
+        self._disconnected = asyncio.Event()
+        self._request_sent = False
+        self._task: asyncio.Task[None] | None = None
+
+    # -- ASGI side ---------------------------------------------------------
+
+    async def _receive(self) -> dict[str, Any]:
+        """One empty body, then block until the test hangs up.
+
+        The same shape httpx's own `ASGITransport` uses: a GET still has to be
+        told its (empty) body is complete, and everything after that is the
+        client's disconnect, which is what `request.is_disconnected()` reads.
+        """
+        if not self._request_sent:
+            self._request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await self._disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            self.status_code = message["status"]
+            self.headers = {k.decode(): v.decode() for k, v in message.get("headers", [])}
+            self._started.set()
+        elif message["type"] == "http.response.body":
+            body = message.get("body", b"")
+            if body:
+                await self._chunks.put(body)
+            if not message.get("more_body", False):
+                await self._chunks.put(None)
+
+    async def connect(self, path: str, headers: dict[str, str]) -> None:
+        """Run the app in a task and return once it has answered with a status."""
+        scope: dict[str, Any] = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.1"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": ("test", 1234),
+            "server": ("test", 80),
+        }
+        serving: asyncio.Task[Any] = asyncio.create_task(app(scope, self._receive, self._send))
+        self._task = serving
+        started: asyncio.Task[Any] = asyncio.create_task(self._started.wait())
+        # Either outcome ends the wait: a status line, or the app giving up
+        # first — waiting only on the status would spend the whole timeout
+        # before reporting an error the app already raised.
+        await asyncio.wait({serving, started}, timeout=SSE_EVENT_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        started.cancel()
+        self._raise_if_failed()
+        assert self.status_code is not None, "the app never sent http.response.start"
+
+    def _raise_if_failed(self) -> None:
+        """Surface an exception the app raised instead of reporting a timeout for it."""
+        if self._task is not None and self._task.done() and not self._task.cancelled():
+            exc = self._task.exception()
+            if exc is not None:
+                raise exc
+
+    # -- test side ---------------------------------------------------------
+
+    async def _next_frame(self, timeout: float) -> str | None:
+        """The next `\\n\\n`-terminated frame, or None once the stream ends."""
+        while "\n\n" not in self._buffer:
+            try:
+                chunk = await asyncio.wait_for(self._chunks.get(), timeout=timeout)
+            except TimeoutError:
+                self._raise_if_failed()
+                raise
+            if chunk is None:
+                return None
+            self._buffer += chunk.decode()
+        frame, _, rest = self._buffer.partition("\n\n")
+        self._buffer = rest
+        return frame
+
+    async def next_event(self, timeout: float = SSE_EVENT_TIMEOUT) -> SseEvent:
+        """The next event frame, skipping heartbeat comments."""
+        while True:
+            frame = await self._next_frame(timeout)
+            if frame is None:
+                error_msg = "stream closed before an event arrived"
+                raise AssertionError(error_msg)
+            lines = frame.splitlines()
+            data = [line.removeprefix("data:").strip() for line in lines if line.startswith("data:")]
+            if not data:
+                continue  # a `: ping` heartbeat carries no data line
+            name = next((line.removeprefix("event:").strip() for line in lines if line.startswith("event:")), None)
+            return SseEvent(name=name, data=json.loads("".join(data)))
+
+    async def expect_no_event(self, timeout: float = SSE_SILENCE_TIMEOUT) -> None:
+        """Assert nothing is delivered inside the window.
+
+        The `TimeoutError` is the *pass* condition, which is why it is caught
+        here rather than in each caller: an absence can only be observed by
+        waiting for it, and a reader of the test should see that the wait is
+        deliberate rather than a flaky sleep.
+        """
+        with contextlib.suppress(TimeoutError):
+            event = await self.next_event(timeout=timeout)
+            error_msg = f"expected no event, got {event!r}"
+            raise AssertionError(error_msg)
+
+    async def wait_closed(self, timeout: float = SSE_EVENT_TIMEOUT) -> None:
+        """Assert the hub ended the stream itself, without the client hanging up."""
+        assert self._task is not None
+        done, _ = await asyncio.wait({self._task}, timeout=timeout)
+        self._raise_if_failed()
+        assert done, "stream was still open after the timeout"
+
+    async def aclose(self) -> None:
+        """Hang up, then make sure the connection is really gone.
+
+        Disconnect first — that is the path production takes and the one
+        `request.is_disconnected()` exists for — and cancel only if the app is
+        still running after it, since `BaseHTTPMiddleware` is not obliged to
+        forward the disconnect to the endpoint underneath it.
+        """
+        self._disconnected.set()
+        if self._task is None:
+            return
+        await asyncio.wait({self._task}, timeout=SSE_SILENCE_TIMEOUT)
+        if not self._task.done():
+            self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+
+@asynccontextmanager
+async def open_sse_stream(headers: dict[str, str], *, path: str = "/events") -> AsyncIterator[SseStream]:
+    """Open one SSE connection, guaranteed closed on the way out.
+
+    Returns only once the app has answered with `http.response.start`, so a
+    caller may report a job immediately afterwards without racing the
+    subscription: by then `EventBus.subscribe` has already run.
+    """
+    stream = SseStream()
+    try:
+        await stream.connect(path, headers)
+        yield stream
+    finally:
+        await stream.aclose()

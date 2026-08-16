@@ -525,9 +525,17 @@ class SseStream:
         return frame
 
     async def next_event(self, timeout: float = SSE_EVENT_TIMEOUT) -> SseEvent:
-        """The next event frame, skipping heartbeat comments."""
+        """The next event frame, skipping heartbeat comments.
+
+        Tracked as one deadline for the whole call, not re-armed per frame:
+        `timeout` bounds the wait for an *event*, and a skipped `: ping`
+        heartbeat is not one — re-arming on every heartbeat would let a fast
+        enough cadence keep this "within budget" indefinitely.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
         while True:
-            frame = await self._next_frame(timeout)
+            remaining = deadline - asyncio.get_running_loop().time()
+            frame = await self._next_frame(remaining)
             if frame is None:
                 error_msg = "stream closed before an event arrived"
                 raise AssertionError(error_msg)

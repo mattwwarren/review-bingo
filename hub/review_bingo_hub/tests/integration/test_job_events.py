@@ -29,6 +29,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
+from review_bingo_hub.api.events import RETRY_AFTER_SECONDS
 from review_bingo_hub.core.config import settings
 from review_bingo_hub.models.github_identity import IdentityRepoAccess
 from review_bingo_hub.tests.integration.conftest import (
@@ -354,6 +355,7 @@ async def test_events_endpoint_returns_503_when_subscriber_cap_reached(
 
         refused = await asyncio.wait_for(client.get("/events", headers=headers), timeout=SSE_EVENT_TIMEOUT)
         assert refused.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+        assert refused.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
 
         # The refusal is not allowed to cost the connections already accepted.
         await relay_a_round(client, headers, job_id)

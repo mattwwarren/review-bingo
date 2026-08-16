@@ -282,6 +282,20 @@ class Settings(BaseSettings):
             "everybody out. Defaults to 12h — one working day"
         ),
     )
+    model_groups: dict[str, list[str]] = Field(
+        default_factory=dict,
+        alias="MODEL_GROUPS",
+        description=(
+            'Operator-curated named bundles of model names, e.g. {"frontier": ["claude-opus-4", '
+            '"gpt-5"]}, sourced from a JSON object in MODEL_GROUPS. Purely operator config (RFC '
+            "0003 A4): no group definition lands in a tracked file, because which models an "
+            "operator considers equivalent is a judgement about their own grid, not a fact about "
+            "this codebase. Resolved fresh on every lease rather than snapshotted onto a job, so "
+            "narrowing a group applies to the next lease instead of only to work enqueued after "
+            "the edit. No parsing code of ours: pydantic-settings JSON-decodes a complex-typed "
+            "field natively, unlike cors_allowed_origins_raw, whose str|list[str] union defeats it"
+        ),
+    )
 
     @staticmethod
     def _validate_choice(value: str, allowed: list[str], field_name: str) -> str:

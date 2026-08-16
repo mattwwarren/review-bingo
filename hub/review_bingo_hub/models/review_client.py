@@ -73,6 +73,18 @@ class ReviewClientBase(SQLModel):
         sa_type=sa.String(),
         description="Self-declared capability tier, matched against repo policy floors",
     )
+    runtime_identity: str | None = Field(
+        default=None,
+        description=(
+            "Self-declared runtime this client reviews from (Hermes, Claude Code, Codex, an "
+            "ollama wrapper, ...). On the base rather than on CheckInRequest because it is a "
+            "static property of the registered process, the same kind of thing as model and "
+            "provider — not something a heartbeat renegotiates. Nothing enforces that "
+            "immutability beyond there being no client-update endpoint to change it through, and "
+            "nothing gates on it yet: it is declared capability metadata, not a fourth dispatch "
+            "gate. Optional, so a client that never mentions it still registers"
+        ),
+    )
 
 
 class ReviewClient(TimestampedTable, ReviewClientBase, table=True):

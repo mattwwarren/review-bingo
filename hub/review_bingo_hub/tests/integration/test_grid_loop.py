@@ -877,9 +877,7 @@ async def test_model_group_edit_applies_to_subsequent_leases(
 
 
 @pytest.mark.asyncio
-async def test_upsert_policy_rejects_unknown_model_group(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_upsert_policy_rejects_unknown_model_group(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """A group name nobody defined is a typo, and a typo'd gate is an open gate.
 
     Caught at policy-write time rather than at lease time: an undefined group

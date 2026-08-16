@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+from typing import ClassVar
 
 import pytest
 
@@ -116,7 +117,7 @@ class TestModelAllowed:
     lockstep with, exactly as TestStrategiesOverlap does for the strategy gate.
     """
 
-    GROUPS: dict[str, list[str]] = {"frontier": ["claude-opus-4", "gpt-5"], "local": ["qwen2.5-coder"]}
+    GROUPS: ClassVar[dict[str, list[str]]] = {"frontier": ["claude-opus-4", "gpt-5"], "local": ["qwen2.5-coder"]}
 
     def test_both_empty_matches_any_model(self) -> None:
         assert model_allowed([], [], "anything-at-all", self.GROUPS) is True

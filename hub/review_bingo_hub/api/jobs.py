@@ -14,8 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 
 from review_bingo_hub.api.clients import ClientDep, ScopedCallerDep
+from review_bingo_hub.core.config import settings
 from review_bingo_hub.db.session import SessionDep
 from review_bingo_hub.models.event import JobRelayedEvent
+from review_bingo_hub.models.repo_policy import model_allowed
 from review_bingo_hub.models.review_client import ClientStatus, tiers_at_or_below
 from review_bingo_hub.models.review_job import (
     JobState,
@@ -35,6 +37,7 @@ from review_bingo_hub.services.job_service import (
     list_jobs,
     report_job,
 )
+from review_bingo_hub.services.policy_service import get_policy
 from review_bingo_hub.services.relay_service import relay_result, relay_target, render_comment
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -99,6 +102,25 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Job requires tier {str(job.min_tier)!r} or better; this client declares {str(client.tier)!r}",
+        )
+    # The model allowlist gets its own pre-check for the same reason, and sits
+    # between the two so the three 403s come back in the same order the lease
+    # query applies them — a client fixing one reason at a time meets them in a
+    # stable sequence rather than a query-plan-dependent one.
+    #
+    # `model_allowed` is the same rule `job_service._model_allowlist_clause`
+    # expresses as SQL — shared here so the two never drift. A repo with no
+    # policy row passes empty lists, matching the coalesce on the SQL side.
+    policy = await get_policy(session, job.repo_full_name)
+    accepted_models = policy.accepted_models if policy is not None else []
+    accepted_model_groups = policy.accepted_model_groups if policy is not None else []
+    if not model_allowed(accepted_models, accepted_model_groups, client.model_name, settings.model_groups):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Job's repo accepts models {sorted(accepted_models)} and model groups "
+                f"{sorted(accepted_model_groups)}; this client declares {client.model_name!r}"
+            ),
         )
     # The strategy contract gets its own pre-check for the same reason the tier
     # floor above has one: `lease_specific_job` would refuse this job by simply

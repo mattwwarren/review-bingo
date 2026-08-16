@@ -15,12 +15,18 @@ wants the "not installed" branch re-patches it itself.
 
 from __future__ import annotations
 
+import io
+import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from _common import DRY_RUN_ENV_VAR
+from pass_through_review import REVIEWER_ENV_VAR
+from two_model_review import FIX_ENV_VAR, REVIEW_ENV_VAR
 
 # Absolute paths the stubbed `shutil.which` hands back. Absolute because the
 # scripts resolve executables before invoking them (ruff S607), so every
@@ -151,8 +157,22 @@ def clean_review_cmd_env(monkeypatch: pytest.MonkeyPatch) -> None:
     The scripts' whole contract is "read these four env vars", so a var leaking
     in from the developer's own shell would quietly change what a test proves.
     """
-    for name in ("REVIEWER_MODEL_CMD", "FIX_MODEL_CMD", "REVIEW_MODEL_CMD", "REVIEW_CMD_DRY_RUN"):
+    for name in (REVIEWER_ENV_VAR, FIX_ENV_VAR, REVIEW_ENV_VAR, DRY_RUN_ENV_VAR):
         monkeypatch.delenv(name, raising=False)
+
+
+def feed_stdin(monkeypatch: pytest.MonkeyPatch, job: dict[str, Any]) -> None:
+    """Put a job payload on stdin the way the hub actually delivers one: one JSON blob."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(job)))
+
+
+def emitted(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
+    """The one JSON object a script printed, and proof it printed only that."""
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert len(lines) == 1, f"stdout must carry exactly one JSON line, got: {captured.out!r}"
+    report: dict[str, Any] = json.loads(lines[0])
+    return report
 
 
 @pytest.fixture

@@ -42,6 +42,7 @@ from typing import Any
 from _common import (
     GIT_TIMEOUT_SECONDS,
     MODEL_TIMEOUT_SECONDS,
+    REPORT_CONTRACT,
     GitError,
     PatchApplyError,
     ReviewCmdError,
@@ -75,17 +76,6 @@ Answer with a unified diff that applies cleanly with `git apply` against the
 head commit above, and with no prose around it. Paths must be the repository
 paths shown in the diff, with the usual a/ and b/ prefixes. If nothing needs
 fixing, answer with an empty patch."""
-
-REPORT_CONTRACT = """Answer with a single JSON object and nothing else:
-
-{
-  "verdict": "approve" or "findings",
-  "summary": "markdown; this is posted to the pull request verbatim",
-  "findings": [{"file": "path/to/file.py", "line": 42, "title": "one line, specific"}]
-}
-
-Report only what the diff itself shows. An empty `findings` list with an
-"approve" verdict is a valid and often correct answer."""
 
 REVIEW_PROMPT = """You are reviewing a GitHub pull request.
 

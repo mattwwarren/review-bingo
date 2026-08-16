@@ -29,6 +29,7 @@ from typing import Any
 
 from _common import (
     MODEL_TIMEOUT_SECONDS,
+    REPORT_CONTRACT,
     ReviewCmdError,
     emit,
     error_report,
@@ -40,20 +41,6 @@ from _common import (
 )
 
 REVIEWER_ENV_VAR = "REVIEWER_MODEL_CMD"
-
-# Stated as a contract rather than a suggestion because `parse_model_report` is
-# tolerant but not psychic: it can dig a JSON object out of surrounding prose,
-# it cannot invent one.
-REPORT_CONTRACT = """Answer with a single JSON object and nothing else:
-
-{
-  "verdict": "approve" or "findings",
-  "summary": "markdown; this is posted to the pull request verbatim",
-  "findings": [{"file": "path/to/file.py", "line": 42, "title": "one line, specific"}]
-}
-
-Report only what the diff itself shows. An empty `findings` list with an
-"approve" verdict is a valid and often correct answer."""
 
 PROMPT = """You are reviewing a GitHub pull request.
 

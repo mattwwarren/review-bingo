@@ -10,16 +10,14 @@ has: pure stdout, exit 0, an error report for every failure.
 
 from __future__ import annotations
 
-import io
 import json
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import two_model_review
-from conftest import RecordingSubprocess
+from conftest import RecordingSubprocess, emitted, feed_stdin
 
 PATCH_TEXT = "diff --git a/charge.py b/charge.py\n@@\n-bad\n+good\n"
 
@@ -30,19 +28,6 @@ REVIEW_ANSWER = json.dumps(
         "findings": [{"file": "charge.py", "line": 42, "title": "Retry still unbounded"}],
     }
 )
-
-
-def feed_stdin(monkeypatch: pytest.MonkeyPatch, job: dict[str, Any]) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(job)))
-
-
-def emitted(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    """The one JSON object the script printed, and proof it printed only that."""
-    captured = capsys.readouterr()
-    lines = captured.out.splitlines()
-    assert len(lines) == 1, f"stdout must carry exactly one JSON line, got: {captured.out!r}"
-    report: dict[str, Any] = json.loads(lines[0])
-    return report
 
 
 def happy_path(recorder: RecordingSubprocess) -> None:
@@ -119,6 +104,8 @@ def test_clone_uses_gh_repo_clone_then_checks_out_head_sha(
     assert clone.argv == ["/usr/bin/gh", "repo", "clone", "acme/payments", clone_dir, "--", "--quiet"]
     checkout = recording_subprocess.matching("checkout")[0]
     assert checkout.argv == ["/usr/bin/git", "-C", clone_dir, "checkout", job["head_sha"]]
+    # The checkout targets the clone that was just made, so it has to happen after it.
+    assert recording_subprocess.calls.index(clone) < recording_subprocess.calls.index(checkout)
 
 
 @pytest.mark.parametrize("dry_run", ["0", "1"])

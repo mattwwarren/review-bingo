@@ -8,16 +8,14 @@ are, and every way it can fail still ends in a report the hub can read.
 
 from __future__ import annotations
 
-import io
 import json
 import subprocess
-import sys
 from typing import Any
 
 import _common
 import pass_through_review
 import pytest
-from conftest import RecordingSubprocess
+from conftest import RecordingSubprocess, emitted, feed_stdin
 
 MODEL_ANSWER = json.dumps(
     {
@@ -26,19 +24,6 @@ MODEL_ANSWER = json.dumps(
         "findings": [{"file": "payments/charge.py", "line": 42, "title": "Charges twice on retry"}],
     }
 )
-
-
-def feed_stdin(monkeypatch: pytest.MonkeyPatch, job: dict[str, Any]) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(job)))
-
-
-def emitted(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    """The one JSON object the script printed, and proof it printed only that."""
-    captured = capsys.readouterr()
-    lines = captured.out.splitlines()
-    assert len(lines) == 1, f"stdout must carry exactly one JSON line, got: {captured.out!r}"
-    report: dict[str, Any] = json.loads(lines[0])
-    return report
 
 
 def test_main_emits_only_json_to_stdout_with_gh_and_model_noise_on_stderr(

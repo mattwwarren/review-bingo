@@ -60,6 +60,20 @@ INSTALL_HINTS = {
 
 FENCE = "```"
 
+# Stated as a contract rather than a suggestion because `parse_model_report` is
+# tolerant but not psychic: it can dig a JSON object out of surrounding prose,
+# it cannot invent one. Shared by both scripts' review prompts.
+REPORT_CONTRACT = """Answer with a single JSON object and nothing else:
+
+{
+  "verdict": "approve" or "findings",
+  "summary": "markdown; this is posted to the pull request verbatim",
+  "findings": [{"file": "path/to/file.py", "line": 42, "title": "one line, specific"}]
+}
+
+Report only what the diff itself shows. An empty `findings` list with an
+"approve" verdict is a valid and often correct answer."""
+
 
 class ReviewCmdError(RuntimeError):
     """A round that cannot be completed. Always becomes an error report, never an exit code."""

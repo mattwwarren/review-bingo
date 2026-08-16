@@ -10,6 +10,9 @@ from review_bingo_hub.models.document import Document
 from review_bingo_hub.models.github_identity import GithubIdentity, IdentityRepoAccess
 from review_bingo_hub.models.membership import Membership
 from review_bingo_hub.models.organization import Organization
+from review_bingo_hub.models.repo_policy import RepoPolicy
+from review_bingo_hub.models.review_client import ReviewClient
+from review_bingo_hub.models.review_job import ReviewJob
 from review_bingo_hub.models.user import User
 
 __all__ = [
@@ -21,5 +24,8 @@ __all__ = [
     "IdentityRepoAccess",
     "Membership",
     "Organization",
+    "RepoPolicy",
+    "ReviewClient",
+    "ReviewJob",
     "User",
 ]

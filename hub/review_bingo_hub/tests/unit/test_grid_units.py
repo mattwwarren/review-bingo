@@ -1,7 +1,9 @@
-"""Unit tests for grid primitives: tier ordering, webhook signatures, relay rendering."""
+"""Unit tests for grid primitives: tier ordering, strategy vocabulary, webhook signatures, relay rendering."""
 
 import hashlib
 import hmac
+
+import pytest
 
 from review_bingo_hub.api.webhooks import verify_signature
 from review_bingo_hub.models.review_client import (
@@ -10,6 +12,7 @@ from review_bingo_hub.models.review_client import (
     tiers_at_or_below,
 )
 from review_bingo_hub.models.review_job import ReviewJob
+from review_bingo_hub.models.review_strategy import STRATEGY_REGISTRY, strategies_overlap, validate_strategies
 from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.relay_service import render_comment
 
@@ -29,6 +32,63 @@ class TestModelTiers:
         assert ModelTier.FRONTIER not in tiers
         assert ModelTier.STANDARD in tiers
         assert ModelTier.EXPERIMENTAL in tiers
+
+
+class TestReviewStrategy:
+    """The strategy vocabulary: four registry names, plus a `custom:<name>` escape hatch."""
+
+    def test_registry_holds_the_four_named_strategies(self) -> None:
+        assert set(STRATEGY_REGISTRY) == {"security", "shallow", "full-loop", "fix-and-reverify"}
+
+    @pytest.mark.parametrize("name", ["security", "shallow", "full-loop", "fix-and-reverify"])
+    def test_each_registry_name_passes_unchanged(self, name: str) -> None:
+        assert validate_strategies([name]) == [name]
+
+    def test_custom_escape_hatch_passes(self) -> None:
+        assert validate_strategies(["custom:my-lens"]) == ["custom:my-lens"]
+
+    def test_custom_prefix_with_empty_suffix_rejected(self) -> None:
+        with pytest.raises(ValueError, match="custom:"):
+            validate_strategies(["custom:"])
+
+    def test_registry_match_is_case_sensitive(self) -> None:
+        with pytest.raises(ValueError, match="Security"):
+            validate_strategies(["Security"])
+
+    def test_unknown_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="nonsense"):
+            validate_strategies(["nonsense"])
+
+    def test_empty_list_passes(self) -> None:
+        """No strategies is the match-any sentinel, not a strategy needing validation."""
+        assert validate_strategies([]) == []
+
+    def test_one_bad_entry_fails_the_whole_list(self) -> None:
+        with pytest.raises(ValueError, match="nonsense"):
+            validate_strategies(["security", "nonsense"])
+
+
+class TestStrategiesOverlap:
+    """The Python side of the strategy gate -- api/jobs.py's targeted-lease pre-check.
+
+    job_service._strategy_overlap expresses the identical rule as a Postgres
+    ?| predicate; these cases pin the plain-Python semantics it must stay in
+    lockstep with.
+    """
+
+    def test_empty_requested_matches_any_offered(self) -> None:
+        assert strategies_overlap([], []) is True
+        assert strategies_overlap([], ["shallow"]) is True
+
+    def test_overlap_passes(self) -> None:
+        assert strategies_overlap(["security", "full-loop"], ["full-loop"]) is True
+
+    def test_no_overlap_blocks(self) -> None:
+        assert strategies_overlap(["security"], ["shallow"]) is False
+
+    def test_nonempty_requested_against_empty_offered_blocks(self) -> None:
+        """A client offering nothing overlaps nothing -- not symmetric with the job-side sentinel."""
+        assert strategies_overlap(["security"], []) is False
 
 
 class TestWebhookSignature:

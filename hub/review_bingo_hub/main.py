@@ -39,6 +39,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -250,6 +251,15 @@ async def validation_exception_handler(
 
     Returns structured 422 response with detailed validation error information.
     FastAPI uses RequestValidationError for request body validation failures.
+
+    `exc.errors()` goes through `jsonable_encoder` for the same reason FastAPI's
+    own built-in handler does it: a `@field_validator` that signals failure by
+    raising `ValueError` — the documented Pydantic idiom, and what
+    `OrganizationCreate.validate_name` and `RepoPolicyUpsert` both do — leaves
+    the raw exception object in each error's `ctx`, which `json.dumps` cannot
+    encode. Without this, the 422 handler raises `TypeError` while rendering and
+    the `TypeError` handler below answers 400, so a validation failure reports
+    itself as the wrong class of error entirely.
     """
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -257,7 +267,7 @@ async def validation_exception_handler(
             "status_code": status.HTTP_422_UNPROCESSABLE_CONTENT,
             "error_code": "VALIDATION_ERROR",
             "message": "Request validation failed",
-            "details": exc.errors(),
+            "details": jsonable_encoder(exc.errors()),
         },
     )
 
@@ -271,6 +281,10 @@ async def pydantic_validation_exception_handler(
 
     Returns structured 422 response with detailed validation error information.
     This catches ValidationError raised in service layer or business logic.
+
+    Encoded the same way, and for the same reason, as the request-side handler
+    above — the two must not drift into one that survives a ValueError-raising
+    validator and one that does not.
     """
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -278,7 +292,7 @@ async def pydantic_validation_exception_handler(
             "status_code": status.HTTP_422_UNPROCESSABLE_CONTENT,
             "error_code": "VALIDATION_ERROR",
             "message": "Data validation failed",
-            "details": exc.errors(),
+            "details": jsonable_encoder(exc.errors()),
         },
     )
 

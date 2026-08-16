@@ -24,6 +24,7 @@ from review_bingo_hub.models.review_job import (
     ReviewJobRead,
     ReviewJobReport,
 )
+from review_bingo_hub.models.review_strategy import strategies_overlap
 from review_bingo_hub.services.client_service import touch_client
 from review_bingo_hub.services.job_service import (
     StaleIdentityAccessError,
@@ -98,6 +99,24 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Job requires tier {str(job.min_tier)!r} or better; this client declares {str(client.tier)!r}",
+        )
+    # The strategy contract gets its own pre-check for the same reason the tier
+    # floor above has one: `lease_specific_job` would refuse this job by simply
+    # not matching its query, which surfaces as the generic 409 below — the same
+    # answer a job someone else already holds gets. A capability the caller could
+    # fix by declaring it at check-in deserves to be told apart from a race it
+    # lost. Worded to name strategies rather than tiers, so the two 403s stay
+    # distinguishable reasons rather than one indistinguishable refusal.
+    #
+    # `strategies_overlap` is the same rule `job_service._strategy_overlap`
+    # expresses as SQL — shared here so the two never drift.
+    if not strategies_overlap(job.requested_strategies, client.offered_strategies):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Job requests strategies {sorted(job.requested_strategies)}; "
+                f"this client offers {sorted(client.offered_strategies)}"
+            ),
         )
 
     await touch_client(session, client)

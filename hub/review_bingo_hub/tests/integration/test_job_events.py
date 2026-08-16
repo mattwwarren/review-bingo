@@ -161,6 +161,44 @@ async def test_subscriber_does_not_receive_job_relayed_for_inaccessible_repo(
         await stream.expect_no_event()
 
 
+async def test_no_event_published_when_relay_fails(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of R6/the AC: emission is gated on the relay succeeding.
+
+    `report_job_endpoint` only builds and publishes a `JobRelayedEvent` inside
+    `if relay_error is None:`. Forcing `relay_result` to return an error string
+    (its documented failure contract — see `relay_service.relay_result`) drives
+    that branch false directly, without needing a real GitHub relay failure.
+    """
+    fake = FakeGithubIdentityService()
+    _, headers = await enrol_github_client(
+        client, monkeypatch, fake, Enrolee(login="watcher", user_id=1, repo_access=[readable(ALLOWED)])
+    )
+    job_id = await enqueue(client, ALLOWED, "sse-relay-fails")
+
+    async def failing_relay(_job: object) -> str:
+        return "simulated relay failure"
+
+    monkeypatch.setattr("review_bingo_hub.api.jobs.relay_result", failing_relay)
+
+    async with open_sse_stream(headers) as stream:
+        lease = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+        assert lease.status_code == HTTPStatus.OK
+
+        report = await client.post(
+            f"/jobs/{job_id}/report",
+            json={"verdict": "approve", "summary": "Nothing found.", "findings": []},
+            headers=headers,
+        )
+        assert report.status_code == HTTPStatus.OK
+        assert report.json()["state"] == "reported"
+        assert report.json()["relay_error"] == "simulated relay failure"
+
+        await stream.expect_no_event()
+
+
 async def test_subscriber_access_narrows_mid_stream_stops_receiving_events(
     client: AsyncClient,
     session: AsyncSession,

@@ -41,6 +41,11 @@ HEARTBEAT = ": ping\n\n"
 
 DETAIL_TOO_MANY_SUBSCRIBERS = "Too many open event streams; retry shortly"
 
+# A short, fixed backoff hint rather than something tied to the heartbeat
+# cadence: the cap frees up as soon as any one of up to `max_sse_subscribers`
+# streams closes, which happens far more often than once per heartbeat.
+RETRY_AFTER_SECONDS = 5
+
 
 def _frame(event: JobRelayedEvent) -> str:
     """One SSE frame: the event's name, then its JSON payload."""
@@ -110,6 +115,7 @@ async def events_endpoint(request: Request, caller: ScopedCallerDep) -> Streamin
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=DETAIL_TOO_MANY_SUBSCRIBERS,
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from exc
 
     return StreamingResponse(

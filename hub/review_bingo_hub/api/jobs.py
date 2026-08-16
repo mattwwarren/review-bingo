@@ -99,6 +99,21 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Job requires tier {str(job.min_tier)!r} or better; this client declares {str(client.tier)!r}",
         )
+    # The strategy contract gets its own pre-check for the same reason the tier
+    # floor above has one: `lease_specific_job` would refuse this job by simply
+    # not matching its query, which surfaces as the generic 409 below — the same
+    # answer a job someone else already holds gets. A capability the caller could
+    # fix by declaring it at check-in deserves to be told apart from a race it
+    # lost. Worded to name strategies rather than tiers, so the two 403s stay
+    # distinguishable reasons rather than one indistinguishable refusal.
+    if job.requested_strategies and not set(job.requested_strategies) & set(client.offered_strategies):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Job requests strategies {sorted(job.requested_strategies)}; "
+                f"this client offers {sorted(client.offered_strategies)}"
+            ),
+        )
 
     await touch_client(session, client)
     try:

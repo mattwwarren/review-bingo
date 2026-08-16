@@ -188,6 +188,12 @@ async def check_in_endpoint(
     account than this client is already linked to, is rejected with 401 and
     check-in does not proceed.
 
+    An optional `offered_strategies` declares which review strategies this
+    client is willing to run, matched against a job's requested strategies at
+    lease time. Omitting the key leaves whatever is persisted alone — a plain
+    heartbeat must not silently withdraw a declaration the client already made
+    — while an explicit empty list clears it.
+
     The response carries `identity_access_ttl_seconds` either way. It is
     Settings-derived, not a function of whether a re-attestation happened, and
     it is here so an unattended client can schedule its next re-attestation off
@@ -212,6 +218,12 @@ async def check_in_endpoint(
             pass
         except EnrolmentDeniedError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=exc.detail) from exc
+    # `is not None`, not truthiness — unlike `github_token` above, an empty list
+    # is a real declaration here ("I offer nothing in particular"), and a client
+    # that means to withdraw its strategies must have a way to say so. Only an
+    # omitted key leaves the persisted value alone.
+    if payload is not None and payload.offered_strategies is not None:
+        client.offered_strategies = payload.offered_strategies
     client = await set_client_status(session, client, ClientStatus.CHECKED_IN)
     await session.commit()
     return ReviewClientCheckInRead(

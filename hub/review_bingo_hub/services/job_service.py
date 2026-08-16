@@ -10,7 +10,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import sqlalchemy as sa
 from sqlalchemy import ColumnElement, Select, select, update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
@@ -54,6 +56,30 @@ async def _refuse_if_access_stale(session: AsyncSession, client: ReviewClient) -
     """
     if await identity_access_is_stale(session, client):
         raise StaleIdentityAccessError
+
+
+def _strategy_overlap(client: ReviewClient) -> ColumnElement[bool]:
+    """The strategy gate: a job's requested strategies must be empty, or overlap the client's.
+
+    One expression shared by both lease paths, for the reason `_filter_to_access`
+    is one function: two copies of a dispatch gate are two places for it to
+    drift, and naming a job is not a way around a repo's strategy contract any
+    more than it is a way around its model floor.
+
+    Empty on the *job* side is the match-any sentinel — a repo that named no
+    strategies did not name an impossible one. Empty on the *client* side is
+    not symmetric with that: a client offering nothing overlaps nothing, so it
+    is only ever handed jobs that asked for nothing.
+
+    `?|` is Postgres' "does this JSONB array hold any of these strings", which
+    keeps the whole gate inside the same locking SELECT instead of filtering in
+    Python after the rows come back. #65's model allowlist belongs beside this
+    one, as another `.where()` on the same query.
+    """
+    return sa.or_(
+        sa.func.jsonb_array_length(col(ReviewJob.requested_strategies)) == 0,
+        col(ReviewJob.requested_strategies).op("?|")(sa.cast(client.offered_strategies, postgresql.ARRAY(sa.Text))),
+    )
 
 
 async def _filter_to_access(session: AsyncSession, identity_id: UUID | None, query: Select) -> Select:
@@ -101,6 +127,7 @@ async def enqueue_job(
     job = ReviewJob(
         **spec.model_dump(),
         min_tier=policy.min_tier if policy is not None else ModelTier.EXPERIMENTAL,
+        requested_strategies=policy.default_strategies if policy is not None else [],
     )
     session.add(job)
     await session.flush()  # type: ignore[attr-defined]
@@ -204,12 +231,13 @@ async def reported_jobs_for_client(session: AsyncSession, client_id: UUID) -> li
 async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJob | None:
     """Hand the oldest eligible queued job to a client.
 
-    Eligibility is three independent gates. The policy floor: the job's min_tier
-    must be at or below the client's declared tier. Access: the job's repo must
-    be one the client's GitHub account can reach. And freshness: that access
-    snapshot must not be older than its TTL. All three are resolved here rather
-    than passed in, so no caller can hand this function a wider scope than the
-    client actually has.
+    Eligibility is four independent gates. The policy floor: the job's min_tier
+    must be at or below the client's declared tier. The strategy contract: the
+    job's requested_strategies must be empty or overlap what the client offers.
+    Access: the job's repo must be one the client's GitHub account can reach.
+    And freshness: that access snapshot must not be older than its TTL. All four
+    are resolved here rather than passed in, so no caller can hand this function
+    a wider scope than the client actually has.
 
     FOR UPDATE SKIP LOCKED keeps concurrent leases from colliding.
 
@@ -226,6 +254,7 @@ async def lease_next_job(session: AsyncSession, client: ReviewClient) -> ReviewJ
         select(ReviewJob)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
         .where(col(ReviewJob.min_tier).in_(eligible_tiers))
+        .where(_strategy_overlap(client))
         .order_by(col(ReviewJob.created_at))
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -246,9 +275,9 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
     Backs "pick this one" flows (dashboard selection, MCP clients) where the
     caller already knows which job it wants. The eligibility rules are the
     same as `lease_next_job` — naming a job is not a way around a repo's model
-    floor, nor around its access set, nor around that set's TTL — and the state
-    check lives inside the locking SELECT so two callers racing for the same job
-    resolve to exactly one winner.
+    floor, nor its strategy contract, nor around its access set, nor around that
+    set's TTL — and the state check lives inside the locking SELECT so two
+    callers racing for the same job resolve to exactly one winner.
 
     Raises:
         StaleIdentityAccessError: the access snapshot is past its TTL.
@@ -262,6 +291,7 @@ async def lease_specific_job(session: AsyncSession, client: ReviewClient, job_id
         .where(col(ReviewJob.id) == job_id)
         .where(col(ReviewJob.state) == JobState.QUEUED.value)
         .where(col(ReviewJob.min_tier).in_(eligible_tiers))
+        .where(_strategy_overlap(client))
         .limit(1)
         .with_for_update(skip_locked=True)
     )

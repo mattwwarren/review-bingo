@@ -6,6 +6,7 @@ from review_bingo_hub.api import (
     auth,
     clients,
     dashboard,
+    events,
     health,
     jobs,
     ping,
@@ -24,5 +25,6 @@ router.include_router(webhooks.router)
 router.include_router(auth.router)
 router.include_router(clients.router)
 router.include_router(jobs.router)
+router.include_router(events.router)
 router.include_router(policies.router)
 router.include_router(dashboard.router)

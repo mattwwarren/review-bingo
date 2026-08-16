@@ -258,6 +258,42 @@ async def identity_access_is_stale(session: AsyncSession, client: ReviewClient) 
     return _snapshot_is_stale(refreshed_at)
 
 
+async def identity_id_access_is_stale(session: AsyncSession, identity_id: UUID | None) -> bool:
+    """`identity_access_is_stale`, asked of an identity that may have no machine.
+
+    The same question, the same TTL (`_snapshot_is_stale`), the same two inert
+    carve-outs — keyed on the identity alone. That is the whole difference, and
+    it is the difference RFC 0003 A1 needs: an open SSE stream may belong to a
+    dashboard session, which is a caller with an identity and no `ReviewClient`
+    row, so a signature demanding a machine could not answer for it at all.
+
+    Separate from `identity_access_is_stale` rather than replacing it: that one
+    reads `client.identity_id` off a row the lease path is already holding, and
+    collapsing them would make every lease fetch or thread an id it has in hand.
+    Both reduce to `_snapshot_is_stale`, so "too old" still has one definition.
+
+    Where the answer is used differs from leasing, and deliberately. Leasing
+    refuses and tells the client to check in again; a stream cannot ask for
+    anything, so it closes and lets the caller reconnect — the reconnect is what
+    makes it present a credential again.
+
+    A missing identity row reads as maximally stale rather than fresh, for the
+    reason `identity_access_is_stale` documents: when an authorization snapshot
+    cannot be found at all, the direction to guess in is "refuse".
+    """
+    if settings.client_enrolment_mode != "github":
+        return False
+    if identity_id is None:
+        return False
+    result = await session.execute(
+        select(GithubIdentity.access_refreshed_at).where(col(GithubIdentity.id) == identity_id)
+    )
+    refreshed_at = result.scalar_one_or_none()
+    if refreshed_at is None:
+        return True
+    return _snapshot_is_stale(refreshed_at)
+
+
 @dataclass(frozen=True)
 class ScopedCaller:
     """Whoever is behind a bearer credential on a *read* endpoint.

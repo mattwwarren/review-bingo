@@ -10,11 +10,12 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 
 from review_bingo_hub.api.clients import ClientDep, ScopedCallerDep
 from review_bingo_hub.db.session import SessionDep
+from review_bingo_hub.models.event import JobRelayedEvent
 from review_bingo_hub.models.review_client import ClientStatus, tiers_at_or_below
 from review_bingo_hub.models.review_job import (
     JobState,
@@ -123,6 +124,7 @@ async def lease_specific_job_endpoint(job_id: UUID, session: SessionDep, client:
 async def report_job_endpoint(
     job_id: UUID,
     payload: ReviewJobReport,
+    request: Request,
     session: SessionDep,
     client: ClientDep,
 ) -> ReviewJobRead:
@@ -135,6 +137,12 @@ async def report_job_endpoint(
     lease, checked below. A client that legitimately leased a job must still be
     able to report on it even if its access snapshot has since narrowed —
     refusing the report would lose finished work, not protect anything.
+
+    A successful relay is also announced to whatever SSE streams are open
+    (RFC 0003 A1). Announced *after* the commit and the relay, never instead of
+    them: subscribers are told about work that already happened, so a stream
+    nobody is reading cannot cost this request anything. `EventBus.publish` is
+    contractually never-raise for the same reason.
     """
     job = await get_job(session, job_id)
     if job is None:
@@ -156,6 +164,21 @@ async def report_job_endpoint(
     session.add(job)
     await session.commit()
     await session.refresh(job)
+
+    if relay_error is None:
+        # Built from the refreshed row rather than the pre-commit one, so a
+        # subscriber is told exactly what this endpoint is about to return.
+        await request.app.state.event_bus.publish(
+            session,
+            JobRelayedEvent(
+                job_id=job.id,
+                repo_full_name=job.repo_full_name,
+                pr_number=job.pr_number,
+                head_sha=job.head_sha,
+                verdict=job.verdict,
+                summary=job.summary,
+            ),
+        )
 
     return ReviewJobRead.model_validate(job)
 

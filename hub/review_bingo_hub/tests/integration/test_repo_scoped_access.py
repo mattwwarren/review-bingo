@@ -49,6 +49,7 @@ from review_bingo_hub.tests.integration.conftest import (
     enqueue,
     enrol_dev_client,
     enrol_github_client,
+    identity_id_of,
     readable,
 )
 
@@ -484,20 +485,6 @@ async def test_roster_unfiltered_in_dev_mode(client: AsyncClient) -> None:
 
 
 DAY_SECONDS = 24 * 60 * 60
-
-
-async def identity_id_of(session: AsyncSession, client_id: str) -> UUID:
-    """The GitHub identity a registered client is linked to.
-
-    `expire_all()` first: `expire_on_commit=False` means a row this session read
-    before the enrolment request would still carry its pre-request values.
-    """
-    session.expire_all()
-    grid_client = (
-        await session.execute(select(ReviewClient).where(col(ReviewClient.id) == UUID(client_id)))
-    ).scalar_one()
-    assert grid_client.identity_id is not None
-    return grid_client.identity_id
 
 
 async def enrol_with_stale_access(

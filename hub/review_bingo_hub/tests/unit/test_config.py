@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
 from review_bingo_hub.core.config import ConfigurationError, Settings
 from review_bingo_hub.core.storage import StorageProvider
@@ -570,3 +571,68 @@ class TestDashboardSessionTtlConfig:
             Settings()
 
         assert "DASHBOARD_SESSION_TTL_SECONDS" in str(exc_info.value)
+
+
+class TestModelGroups:
+    """Operator-curated named bundles of model names (RFC 0003 A4).
+
+    Purely operator config: no group definition lands in a tracked file, so the
+    only source is the MODEL_GROUPS env var. Same chdir discipline as the TTL
+    classes above, for the same reason — a developer's hub/.env must not be able
+    to decide whether these pass.
+    """
+
+    def test_model_groups_defaults_to_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """No configured groups is the OSS default, and it must not be an error."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MODEL_GROUPS", raising=False)
+
+        settings = Settings()
+
+        assert settings.model_groups == {}
+
+    def test_model_groups_parsed_from_json_env_var(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """pydantic-settings JSON-decodes a complex-typed field with no parsing code of ours.
+
+        Pinned rather than assumed: `cors_allowed_origins_raw` above needs a
+        hand-rolled parser precisely because its `str | list[str]` union defeats
+        this, so "the framework handles it" is a claim about this field's type,
+        not a general one.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MODEL_GROUPS", '{"frontier": ["claude-opus-4", "gpt-5"], "local": ["qwen2.5-coder"]}')
+
+        settings = Settings()
+
+        assert settings.model_groups == {
+            "frontier": ["claude-opus-4", "gpt-5"],
+            "local": ["qwen2.5-coder"],
+        }
+
+    def test_malformed_model_groups_fails_fast(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A typo'd MODEL_GROUPS must not silently start the hub with no groups.
+
+        `SettingsError` rather than `ValidationError`: pydantic-settings fails
+        during source parsing, before the value ever reaches field validation.
+        It subclasses ValueError, so a startup wrapper catching that still
+        catches this.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MODEL_GROUPS", "frontier=claude-opus-4")
+
+        with pytest.raises(SettingsError) as exc_info:
+            Settings()
+
+        assert "model_groups" in str(exc_info.value)

@@ -50,6 +50,7 @@ async def register_and_check_in(
     name: str,
     tier: str,
     strategies: list[str] | None = None,
+    model_name: str = "test-model",
 ) -> tuple[str, dict[str, str]]:
     """Register a grid client of the given tier, check it in, return (id, auth headers).
 
@@ -57,10 +58,14 @@ async def register_and_check_in(
     when supplied — None sends the bodiless check-in every existing caller
     already sends, which is the omission case the endpoint treats as "leave
     whatever is persisted alone".
+
+    `model_name` defaults to the same placeholder every existing caller relied
+    on when it was hardcoded, so the model-allowlist tests can vary the one
+    thing they are about without any other test in this file changing.
     """
     response = await client.post(
         "/clients",
-        json={"name": name, "model_name": "test-model", "provider": "test", "tier": tier},
+        json={"name": name, "model_name": model_name, "provider": "test", "tier": tier},
     )
     assert response.status_code == HTTPStatus.CREATED
     body = response.json()
@@ -747,3 +752,213 @@ async def test_check_in_rejects_invalid_offered_strategy(client: AsyncClient) ->
 
     response = await client.post("/clients/check-in", headers=headers, json={"offered_strategies": ["Security"]})
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+# --- Model allowlist + model groups (RFC 0003 A4) -------------------------------
+#
+# The third dispatch gate, stacked beside the tier floor and the strategy
+# contract: a repo may name the exact models (or operator-curated groups of
+# models) it will accept a review from. Empty on the policy side means "any",
+# so every repo above keeps leasing exactly as it did.
+#
+# Unlike `requested_strategies`, these are *not* snapshotted onto the job —
+# they are read live off RepoPolicy at lease time, which is what makes a group
+# edit apply to the next lease rather than only to work enqueued afterwards.
+
+
+@pytest.mark.asyncio
+async def test_model_allowlist_blocks_client_whose_model_is_not_accepted(client: AsyncClient) -> None:
+    repo = "acme/allowlist"
+    response = await client.put(f"/policies/{repo}", json={"accepted_models": ["claude-opus-4"]})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_models"] == ["claude-opus-4"]
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="allowlist-sha-1"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    # Frontier tier on both clients, so the allowlist is the only thing that can
+    # account for the difference between them.
+    _, blocked = await register_and_check_in(client, "allowlist-outsider", "frontier", model_name="qwen2.5-coder")
+    response = await client.post("/jobs/lease", headers=blocked)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() is None
+
+    _, admitted = await register_and_check_in(client, "allowlist-insider", "frontier", model_name="claude-opus-4")
+    response = await client.post("/jobs/lease", headers=admitted)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_model_allowlist_empty_leases_to_anyone_above_tier_floor(client: AsyncClient) -> None:
+    """No allowlist is match-any — the OSS default, and this file's regression guard.
+
+    Every test above this section registers clients with an arbitrary model and
+    sets no allowlist; if the gate ever stopped treating empty as match-any they
+    would all go red together, which is a worse signal than one named test.
+    """
+    repo = "acme/allowlist-open"
+    response = await client.put(f"/policies/{repo}", json={"min_tier": "standard"})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_models"] == []
+    assert response.json()["accepted_model_groups"] == []
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="allowlist-open-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "open-grid-client", "frontier", model_name="some-unlisted-7b")
+    response = await client.post("/jobs/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_model_group_edit_applies_to_subsequent_leases(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Group membership resolves at lease time, so re-pointing a group takes immediately.
+
+    The policy row never changes across this test — only `settings.model_groups`
+    does. That is the whole point of resolving live instead of snapshotting the
+    resolved model list onto the job the way `requested_strategies` is
+    snapshotted: an operator who narrows a group must not have to re-PUT every
+    policy that references it.
+    """
+    repo = "acme/group-live"
+    monkeypatch.setattr(settings, "model_groups", {"house-frontier": ["model-a"]})
+
+    response = await client.put(f"/policies/{repo}", json={"accepted_model_groups": ["house-frontier"]})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_model_groups"] == ["house-frontier"]
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="group-sha-a"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_a = response.json()["job_id"]
+
+    _, a_headers = await register_and_check_in(client, "group-model-a", "frontier", model_name="model-a")
+    response = await client.post("/jobs/lease", headers=a_headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_a
+
+    # The operator re-points the group. No PUT touches the policy row.
+    monkeypatch.setattr(settings, "model_groups", {"house-frontier": ["model-b"]})
+
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="group-sha-b"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_b = response.json()["job_id"]
+
+    _, a_again = await register_and_check_in(client, "group-model-a-again", "frontier", model_name="model-a")
+    response = await client.post("/jobs/lease", headers=a_again)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json() is None
+
+    _, b_headers = await register_and_check_in(client, "group-model-b", "frontier", model_name="model-b")
+    response = await client.post("/jobs/lease", headers=b_headers)
+    assert response.status_code == HTTPStatus.OK
+    lease = response.json()
+    assert lease is not None
+    assert lease["job"]["id"] == job_b
+
+
+@pytest.mark.asyncio
+async def test_upsert_policy_rejects_unknown_model_group(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A group name nobody defined is a typo, and a typo'd gate is an open gate.
+
+    Caught at policy-write time rather than at lease time: an undefined group
+    resolves to nobody, so accepting the PUT would leave an owner believing a
+    floor is set while the queue quietly went dry for every client.
+    """
+    repo = "acme/group-unknown"
+    monkeypatch.setattr(settings, "model_groups", {})
+
+    response = await client.put(f"/policies/{repo}", json={"accepted_model_groups": ["nonexistent-group"]})
+    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert "nonexistent-group" in response.json()["detail"]
+
+    # The identical PUT, once the operator actually defines the group.
+    monkeypatch.setattr(settings, "model_groups", {"nonexistent-group": ["model-x"]})
+    response = await client.put(f"/policies/{repo}", json={"accepted_model_groups": ["nonexistent-group"]})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["accepted_model_groups"] == ["nonexistent-group"]
+
+
+@pytest.mark.asyncio
+async def test_lease_specific_job_respects_model_allowlist(client: AsyncClient) -> None:
+    """Naming a job must not be a way around its repo's model allowlist."""
+    repo = "acme/allowlist-target"
+    await client.put(f"/policies/{repo}", json={"accepted_models": ["claude-opus-4"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="allowlist-target-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    assert response.json()["status"] == "queued"
+    job_id = response.json()["job_id"]
+
+    _, blocked = await register_and_check_in(
+        client, "allowlist-target-outsider", "frontier", model_name="qwen2.5-coder"
+    )
+    response = await client.post(f"/jobs/{job_id}/lease", headers=blocked)
+    assert response.status_code == HTTPStatus.FORBIDDEN
+    detail = response.json()["detail"]
+    # Distinguishable from the tier-floor and strategy 403s: it names models,
+    # and neither of the other two vocabularies.
+    assert "claude-opus-4" in detail
+    assert "qwen2.5-coder" in detail
+    assert "tier" not in detail.lower()
+    assert "strateg" not in detail.lower()
+
+    # Refused, not consumed: the job is still there for a client that clears the gate.
+    response = await client.get(f"/jobs/{job_id}", headers=blocked)
+    assert response.json()["state"] == "queued"
+
+    _, admitted = await register_and_check_in(
+        client, "allowlist-target-insider", "frontier", model_name="claude-opus-4"
+    )
+    response = await client.post(f"/jobs/{job_id}/lease", headers=admitted)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["job"]["id"] == job_id
+
+
+@pytest.mark.asyncio
+async def test_registration_carries_runtime_identity(client: AsyncClient) -> None:
+    """A client may declare what runs it, and omitting it stays valid.
+
+    The omission half matters as much as the declaration: `client/bingo_client.py`'s
+    registration_payload() does not send this key, and must keep registering.
+    """
+    response = await client.post(
+        "/clients",
+        json={
+            "name": "hermes-box",
+            "model_name": "test-model",
+            "provider": "test",
+            "tier": "standard",
+            "runtime_identity": "claude-code",
+        },
+    )
+    assert response.status_code == HTTPStatus.CREATED
+    assert response.json()["client"]["runtime_identity"] == "claude-code"
+
+    response = await client.post(
+        "/clients",
+        json={"name": "anonymous-runtime", "model_name": "test-model", "provider": "test", "tier": "standard"},
+    )
+    assert response.status_code == HTTPStatus.CREATED
+    assert response.json()["client"]["runtime_identity"] is None

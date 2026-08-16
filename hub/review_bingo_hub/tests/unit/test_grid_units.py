@@ -6,6 +6,7 @@ import hmac
 import pytest
 
 from review_bingo_hub.api.webhooks import verify_signature
+from review_bingo_hub.models.repo_policy import RepoPolicyBase, model_allowed
 from review_bingo_hub.models.review_client import (
     MODEL_TIER_RANK,
     ModelTier,
@@ -89,6 +90,68 @@ class TestStrategiesOverlap:
     def test_nonempty_requested_against_empty_offered_blocks(self) -> None:
         """A client offering nothing overlaps nothing -- not symmetric with the job-side sentinel."""
         assert strategies_overlap(["security"], []) is False
+
+
+class TestRepoPolicyAllowlistDefaults:
+    """Both allowlist fields default to empty, which is the match-any sentinel.
+
+    Pinned at the Pydantic layer, not just in the migration: a repo that never
+    mentioned an allowlist must keep leasing to every client it leased to
+    before, and a `None` slipping in here would make `model_allowed` throw
+    instead of matching.
+    """
+
+    def test_accepted_models_defaults_to_empty(self) -> None:
+        assert RepoPolicyBase().accepted_models == []
+
+    def test_accepted_model_groups_defaults_to_empty(self) -> None:
+        assert RepoPolicyBase().accepted_model_groups == []
+
+
+class TestModelAllowed:
+    """The Python side of the model-allowlist gate -- api/jobs.py's targeted-lease pre-check.
+
+    job_service._model_allowlist_clause expresses the identical rule as Postgres
+    JSONB predicates; these cases pin the plain-Python semantics it must stay in
+    lockstep with, exactly as TestStrategiesOverlap does for the strategy gate.
+    """
+
+    GROUPS: dict[str, list[str]] = {"frontier": ["claude-opus-4", "gpt-5"], "local": ["qwen2.5-coder"]}
+
+    def test_both_empty_matches_any_model(self) -> None:
+        assert model_allowed([], [], "anything-at-all", self.GROUPS) is True
+
+    def test_named_model_passes(self) -> None:
+        assert model_allowed(["claude-opus-4"], [], "claude-opus-4", self.GROUPS) is True
+
+    def test_unnamed_model_blocked(self) -> None:
+        assert model_allowed(["claude-opus-4"], [], "qwen2.5-coder", self.GROUPS) is False
+
+    def test_group_membership_passes(self) -> None:
+        assert model_allowed([], ["frontier"], "gpt-5", self.GROUPS) is True
+
+    def test_non_member_of_named_group_blocked(self) -> None:
+        assert model_allowed([], ["frontier"], "qwen2.5-coder", self.GROUPS) is False
+
+    def test_effective_allowlist_is_the_union(self) -> None:
+        """Either half may admit a client -- the two fields are OR'd, not AND'd."""
+        assert model_allowed(["qwen2.5-coder"], ["frontier"], "qwen2.5-coder", self.GROUPS) is True
+        assert model_allowed(["qwen2.5-coder"], ["frontier"], "gpt-5", self.GROUPS) is True
+        assert model_allowed(["qwen2.5-coder"], ["frontier"], "mistral-7b", self.GROUPS) is False
+
+    def test_group_with_no_definition_admits_nobody(self) -> None:
+        """A group the operator has since deleted narrows the gate; it must not widen it.
+
+        Fail-closed on absence, the opposite of the empty-list sentinel: `[]`
+        means "no allowlist was declared", while `["frontier"]` against an empty
+        registry means "a declared allowlist that currently matches nothing".
+        """
+        assert model_allowed([], ["frontier"], "claude-opus-4", {}) is False
+
+    def test_group_resolution_reads_the_registry_it_is_handed(self) -> None:
+        """Re-pointing a group changes who clears the same unchanged policy row."""
+        assert model_allowed([], ["frontier"], "model-a", {"frontier": ["model-a"]}) is True
+        assert model_allowed([], ["frontier"], "model-a", {"frontier": ["model-b"]}) is False
 
 
 class TestWebhookSignature:

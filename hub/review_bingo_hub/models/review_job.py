@@ -69,6 +69,11 @@ class ReviewJob(TimestampedTable, ReviewJobBase, table=True):
             nullable=True,
         ),
     )
+    requested_strategies: list[str] = Field(
+        default_factory=list,
+        sa_column=sa.Column(JSONB(), server_default="[]", nullable=False),
+        description="Review strategies this job accepts; empty means any client's offered strategies match",
+    )
     lease_expires_at: datetime | None = Field(default=None, sa_type=sa.DateTime(timezone=True))
     attempts: int = Field(default=0, description="Number of leases handed out")
     max_attempts: int = Field(default=3)
@@ -98,6 +103,7 @@ class ReviewJobRead(ReviewJobBase):
     id: UUID
     state: JobState
     min_tier: ModelTier
+    requested_strategies: list[str]
     leased_by: UUID | None
     lease_expires_at: datetime | None
     attempts: int

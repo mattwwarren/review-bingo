@@ -18,10 +18,12 @@ from typing import ClassVar
 from uuid import UUID
 
 import sqlalchemy as sa
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 from review_bingo_hub.models.base import TimestampedTable
+from review_bingo_hub.models.review_strategy import validate_strategies
 
 
 class ModelTier(StrEnum):
@@ -98,6 +100,12 @@ class ReviewClient(TimestampedTable, ReviewClientBase, table=True):
         sa_type=sa.String(),
         index=True,
     )
+    offered_strategies: list[str] = Field(
+        default_factory=list,
+        sa_column=sa.Column(JSONB(), server_default="[]", nullable=False),
+        description="Review strategies this client is willing to run; matched against a job's "
+        "requested_strategies at lease time",
+    )
     last_seen_at: datetime | None = Field(default=None, sa_type=sa.DateTime(timezone=True))
 
 
@@ -122,6 +130,26 @@ class CheckInRequest(SQLModel):
             "leaves check-in a plain heartbeat"
         ),
     )
+    offered_strategies: list[str] | None = Field(
+        default=None,
+        description=(
+            "Review strategies this client is willing to run; omitted leaves offered_strategies "
+            "unchanged, an explicit empty list clears it"
+        ),
+    )
+
+    @field_validator("offered_strategies")
+    @classmethod
+    def check_offered_strategies(cls, value: list[str] | None) -> list[str] | None:
+        """Reject an out-of-vocabulary strategy at the door, leaving omission alone.
+
+        None is not "no strategies" here — it is "I did not mention them", and
+        the endpoint reads it as leave-unchanged. Only a list that actually
+        arrived is a declaration worth validating.
+        """
+        if value is not None:
+            validate_strategies(value)
+        return value
 
 
 class ReviewClientRead(ReviewClientBase):
@@ -130,6 +158,7 @@ class ReviewClientRead(ReviewClientBase):
     id: UUID
     status: ClientStatus
     identity_id: UUID | None
+    offered_strategies: list[str]
     last_seen_at: datetime | None
     created_at: datetime
 

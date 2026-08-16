@@ -37,6 +37,10 @@ ignore = ["EM102", "TRY003"]
 # TRY002: raising bare Exception is fine when the test only needs *something*
 # to blow up.
 "test_*.py" = ["S101", "PT009", "PLR2004", "ARG001", "ARG002", "ARG005", "ANN401", "TRY002"]
+# examples/conftest.py: shared test infrastructure (fixtures, RecordingSubprocess,
+# the emitted()/feed_stdin() helpers), same rationale as test_*.py above — it is
+# consumed only by that suite and never shipped.
+"examples/conftest.py" = ["S101", "PT009", "PLR2004", "ARG001", "ARG002", "ARG005", "ANN401", "TRY002"]
 
 [tool.ruff.format]
 quote-style = "double"

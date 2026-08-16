@@ -174,6 +174,33 @@ two-model loop — your compute, your call. Without `REVIEW_CMD` the client
 submits a clearly-labelled canned report so the loop can be exercised
 offline (that's what `scripts/demo.sh` does).
 
+### Two you can run today
+
+`client/examples/` holds two working reference scripts — read them before
+writing your own:
+
+- **`pass_through_review.py`** — read-only. `gh pr diff` into your model into a
+  verdict. Nothing is cloned and nothing is written.
+- **`two_model_review.py`** — a cheap model drafts a patch into a throwaway
+  clone, an expensive model reviews the PR knowing what that patch would
+  change. The fix step is off unless you turn it on, and nothing is ever
+  pushed.
+
+```bash
+REVIEWER_MODEL_CMD="claude -p" \
+REVIEW_CMD="uv run client/examples/pass_through_review.py" \
+    uv run client/bingo_client.py loop
+```
+
+Both need **`gh` installed and separately authenticated** — a different
+credential from the one you enrolled with, since the hub's device-flow token is
+`read:user` scope and cannot read a diff.
+
+[`client/examples/README.md`](examples/README.md) is the full write-up: every
+environment variable, the stdout-purity and exit-0 rules a `REVIEW_CMD` has to
+hold, where the two-model loop's blast radius ends, and the equivalent path for
+an MCP agent via `bingo_mcp.py`.
+
 Registration state (hub URL + bearer token, plus the GitHub credentials unless
 you passed `--no-store-github-token`) lands in
 `~/.config/review-bingo/client.json`, mode `0600` (`--state` to override).

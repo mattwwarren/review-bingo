@@ -535,6 +535,34 @@ async def test_policy_defaults_strategies_to_empty_when_omitted(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_policy_put_omitting_default_strategies_leaves_an_existing_gate_unchanged(
+    client: AsyncClient,
+) -> None:
+    """Unlike a brand-new policy, an unrelated PUT must not silently clear an existing gate.
+
+    Regression for the reconcile-from-absence hazard Pre-flight Resolution #5
+    already fixed for check-in's offered_strategies: this is the same hazard
+    on the policy-write path, where it's worse -- a silently-cleared
+    default_strategies means every job the repo enqueues next is leaseable by
+    any client, not just an unattended one missing a heartbeat.
+    """
+    repo = "acme/strategy-sticky"
+    response = await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["default_strategies"] == ["security"]
+
+    # An unrelated PUT that never mentions default_strategies must not clear it.
+    response = await client.put(f"/policies/{repo}", json={"min_tier": "frontier"})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["default_strategies"] == ["security"]
+
+    # And an explicit empty list is still the way to clear it.
+    response = await client.put(f"/policies/{repo}", json={"default_strategies": []})
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["default_strategies"] == []
+
+
+@pytest.mark.asyncio
 async def test_repo_policy_default_strategies_snapshot_onto_enqueued_job(client: AsyncClient) -> None:
     """A job carries what its repo asked for *at enqueue time*, not the current policy."""
     repo = "acme/strategy-snapshot"
@@ -640,6 +668,24 @@ async def test_targeted_lease_still_enforces_the_strategy_gate(client: AsyncClie
 
     response = await client.get(f"/jobs/{job_id}", headers=headers)
     assert response.json()["state"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_targeted_lease_succeeds_when_strategies_overlap(client: AsyncClient) -> None:
+    """The success branch of the same pre-check `test_targeted_lease_still_enforces_the_strategy_gate`
+    exercises the 403 for -- naming a job whose requested_strategies genuinely overlaps the
+    client's offered_strategies must still succeed, not just fail correctly."""
+    repo = "acme/strategy-target-match"
+    await client.put(f"/policies/{repo}", json={"default_strategies": ["security"]})
+    response = await client.post(
+        "/webhooks/github", json=pr_payload(repo=repo, sha="strategy-target-match-sha"), headers=PR_WEBHOOK_HEADERS
+    )
+    job_id = response.json()["job_id"]
+
+    _, headers = await register_and_check_in(client, "strategy-target-match-client", "frontier", ["security"])
+    response = await client.post(f"/jobs/{job_id}/lease", headers=headers)
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()["job"]["id"] == job_id
 
 
 @pytest.mark.asyncio

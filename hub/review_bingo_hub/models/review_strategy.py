@@ -57,3 +57,20 @@ def validate_strategies(values: list[str]) -> list[str]:
         msg = f"Unknown review strategy {value!r}; expected one of {registered}, or {CUSTOM_STRATEGY_PREFIX}<name>"
         raise ValueError(msg)
     return values
+
+
+def strategies_overlap(requested: list[str], offered: list[str]) -> bool:
+    """The strategy gate's matching rule, in-process: empty `requested` is match-any, else any-overlap.
+
+    `services.job_service._strategy_overlap` expresses this same rule as a
+    Postgres JSONB predicate so `lease_next_job`/`lease_specific_job` can gate
+    inside their locking `SELECT` without a second query; this function is the
+    one other place the rule needs to run in plain Python — the targeted-lease
+    endpoint's pre-check (`api/jobs.py`), which already has both lists loaded
+    and would otherwise be a second, independent encoding of the same rule.
+    Keep the two in lockstep by construction: change the semantics here, then
+    carry the change into the SQL expression, not the other way around.
+    """
+    if not requested:
+        return True
+    return bool(set(requested) & set(offered))

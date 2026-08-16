@@ -12,7 +12,7 @@ from review_bingo_hub.models.review_client import (
     tiers_at_or_below,
 )
 from review_bingo_hub.models.review_job import ReviewJob
-from review_bingo_hub.models.review_strategy import STRATEGY_REGISTRY, validate_strategies
+from review_bingo_hub.models.review_strategy import STRATEGY_REGISTRY, strategies_overlap, validate_strategies
 from review_bingo_hub.services.client_service import hash_token
 from review_bingo_hub.services.relay_service import render_comment
 
@@ -66,6 +66,29 @@ class TestReviewStrategy:
     def test_one_bad_entry_fails_the_whole_list(self) -> None:
         with pytest.raises(ValueError, match="nonsense"):
             validate_strategies(["security", "nonsense"])
+
+
+class TestStrategiesOverlap:
+    """The Python side of the strategy gate -- api/jobs.py's targeted-lease pre-check.
+
+    job_service._strategy_overlap expresses the identical rule as a Postgres
+    ?| predicate; these cases pin the plain-Python semantics it must stay in
+    lockstep with.
+    """
+
+    def test_empty_requested_matches_any_offered(self) -> None:
+        assert strategies_overlap([], []) is True
+        assert strategies_overlap([], ["shallow"]) is True
+
+    def test_overlap_passes(self) -> None:
+        assert strategies_overlap(["security", "full-loop"], ["full-loop"]) is True
+
+    def test_no_overlap_blocks(self) -> None:
+        assert strategies_overlap(["security"], ["shallow"]) is False
+
+    def test_nonempty_requested_against_empty_offered_blocks(self) -> None:
+        """A client offering nothing overlaps nothing -- not symmetric with the job-side sentinel."""
+        assert strategies_overlap(["security"], []) is False
 
 
 class TestWebhookSignature:

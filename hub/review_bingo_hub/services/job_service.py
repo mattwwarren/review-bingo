@@ -75,6 +75,11 @@ def _strategy_overlap(client: ReviewClient) -> ColumnElement[bool]:
     keeps the whole gate inside the same locking SELECT instead of filtering in
     Python after the rows come back. #65's model allowlist belongs beside this
     one, as another `.where()` on the same query.
+
+    Same rule, expressed in plain Python for the one caller that already has
+    both lists loaded and isn't running a query: `models.review_strategy.
+    strategies_overlap`, used by `api.jobs`'s targeted-lease pre-check. Change
+    the matching semantics in one, change them in the other.
     """
     return sa.or_(
         sa.func.jsonb_array_length(col(ReviewJob.requested_strategies)) == 0,
